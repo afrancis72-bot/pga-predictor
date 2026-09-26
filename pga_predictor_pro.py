@@ -1282,7 +1282,57 @@ def build_features(
         p["tee_wave_adj"]
         .to_numpy()
     )
+    # -------------------------------------------------------------
+    # OWGR BASELINE STRENGTH
+    # -------------------------------------------------------------
+    # Version 0 baseline for historical testing.
+    # Lower OWGR = stronger golfer.
+    #
+    # We use log rank because the difference between World #1
+    # and World #10 should matter considerably more than the
+    # difference between World #401 and World #410.
 
+    if "owgr" in p.columns:
+
+        owgr = pd.to_numeric(
+            p["owgr"],
+            errors="coerce"
+        )
+
+        # Give unranked players a conservative fallback ranking.
+        fallback_rank = max(
+            500,
+            int(owgr.max()) + 50
+            if owgr.notna().any()
+            else 500
+        )
+
+        owgr = owgr.fillna(
+            fallback_rank
+        ).clip(lower=1)
+
+        # Convert ranking into player strength.
+        # #1 receives the highest raw strength.
+        owgr_strength = -np.log(
+            owgr
+        )
+
+        owgr_z = zscore(
+            pd.Series(
+                owgr_strength,
+                index=p.index
+            )
+        ).fillna(0)
+
+        # For this initial baseline test, OWGR carries substantial
+        # weight because the other data files are not populated yet.
+        score += (
+            1.00 *
+            owgr_z.to_numpy()
+        )
+
+        p["owgr_used"] = owgr
+        p["owgr_strength"] = owgr_z
     # Final model strength.
     p["model_strength"] = score
 
