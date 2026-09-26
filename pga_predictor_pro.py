@@ -1608,9 +1608,21 @@ def predict(
     config: Config
 ):
 
-    players = read_csv(
+       players = read_csv(
         "players.csv"
     )
+
+    # Optional pre-tournament player statistics.
+    player_stats = read_csv(
+        "player_stats.csv"
+    )
+
+    if not player_stats.empty:
+        players = players.merge(
+            player_stats,
+            on="player",
+            how="left"
+        )
 
     results = read_csv(
         "results.csv"
