@@ -11,6 +11,7 @@ class PortfolioSettings:
     lineup_count: int = 10
     salary_cap: int = 50000
     salary_floor: int = 46500
+    min_player_salary: int = 6500
     roster_size: int = 6
     max_exposure: float = 0.70
     min_unique: int = 2
@@ -80,6 +81,7 @@ def optimize_portfolio(
     d = d.dropna(subset=["player", "salary"]).copy()
     d["salary"] = pd.to_numeric(d["salary"], errors="coerce").astype(int)
     d = d[~d.player.isin(excludes)]
+    d = d[d["salary"] >= settings.min_player_salary].copy()
     if not locks.issubset(set(d.player)):
         missing = sorted(locks - set(d.player))
         raise ValueError(f"Locked golfer(s) unavailable: {', '.join(missing)}")
@@ -92,29 +94,33 @@ def optimize_portfolio(
 
     rng = np.random.default_rng(settings.seed)
     values = pool[obj].to_numpy(float)
-    probs = np.exp((values - np.nanmax(values)) / 1.15)
-    probs = probs / probs.sum()
     locked_idx = set(pool.index[pool.player.isin(locks)])
     need = settings.roster_size - len(locked_idx)
     selectable = np.array([i for i in range(len(pool)) if i not in locked_idx])
-    selectable_probs = probs[selectable]
-    selectable_probs = selectable_probs / selectable_probs.sum()
-
     candidates: dict[frozenset[str], tuple[float, int]] = {}
-    for _ in range(settings.candidate_samples):
-        if need:
-            pick = rng.choice(selectable, need, replace=False, p=selectable_probs)
-            idx = list(locked_idx) + list(pick)
-        else:
-            idx = list(locked_idx)
-        lu = pool.iloc[idx]
-        salary = int(lu.salary.sum())
-        if settings.salary_floor <= salary <= settings.salary_cap:
-            names = frozenset(lu.player.astype(str))
-            score = float(lu[obj].sum()) + 0.000015*(salary-settings.salary_floor)
-            old = candidates.get(names)
-            if old is None or score > old[0]:
-                candidates[names] = (score, salary)
+    # Multiple sampling temperatures create both ceiling lineups and enough
+    # diversified alternatives to satisfy portfolio-wide exposure constraints.
+    temps = (1.10, 1.80, 3.00)
+    draws_per_temp = max(20000, settings.candidate_samples // len(temps))
+    for temp in temps:
+        probs = np.exp((values - np.nanmax(values)) / temp)
+        probs = probs / probs.sum()
+        selectable_probs = probs[selectable]
+        selectable_probs = selectable_probs / selectable_probs.sum()
+        for _ in range(draws_per_temp):
+            if need:
+                pick = rng.choice(selectable, need, replace=False, p=selectable_probs)
+                idx = list(locked_idx) + list(pick)
+            else:
+                idx = list(locked_idx)
+            lu = pool.iloc[idx]
+            salary = int(lu.salary.sum())
+            if settings.salary_floor <= salary <= settings.salary_cap:
+                names = frozenset(lu.player.astype(str))
+                score = float(lu[obj].sum()) + 0.000010*(salary-settings.salary_floor)
+                old = candidates.get(names)
+                if old is None or score > old[0]:
+                    candidates[names] = (score, salary)
 
     ranked = sorted([(v[0], v[1], k) for k, v in candidates.items()], reverse=True)
     if not ranked:
