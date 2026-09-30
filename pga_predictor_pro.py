@@ -1608,7 +1608,7 @@ def predict(
     config: Config
 ):
 
-       players = read_csv(
+    players = read_csv(
         "players.csv"
     )
 

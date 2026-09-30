@@ -13,8 +13,8 @@ class PortfolioSettings:
     salary_floor: int = 46500
     min_player_salary: int = 6500
     roster_size: int = 6
-    max_exposure: float = 0.70
-    min_unique: int = 2
+    max_exposure: float = 0.60
+    min_unique: int = 3
     strategy: str = "GPP Ceiling"
     candidate_pool_size: int = 60
     candidate_samples: int = 120000
