@@ -5,7 +5,6 @@ import streamlit as st
 from portfolio_optimizer import PortfolioSettings, optimize_portfolio
 from course_fit_ceiling import COURSE_PROFILES, add_course_fit_ceiling
 from course_fit_simulation import resimulate_with_course_fit_calibrated
-from showdown_ui import render_showdown
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -48,10 +47,16 @@ else:
 
 app_mode = st.sidebar.radio("Game Type", ["Tournament V10.3", "Showdown V1.0"])
 if app_mode == "Showdown V1.0":
-    showdown_base = model.copy() if not model.empty else mc.copy()
-    if "salary" not in showdown_base.columns and "salary" in mc.columns:
-        showdown_base = showdown_base.merge(mc[["player", "salary"]], on="player", how="left")
-    render_showdown(showdown_base)
+    # Lazy-load Showdown so Tournament V10.3 can always start independently.
+    try:
+        from showdown_ui import render_showdown
+        showdown_base = model.copy() if not model.empty else mc.copy()
+        if "salary" not in showdown_base.columns and "salary" in mc.columns:
+            showdown_base = showdown_base.merge(mc[["player", "salary"]], on="player", how="left")
+        render_showdown(showdown_base)
+    except Exception as exc:
+        st.error("Showdown module could not start. Tournament V10.3 remains available.")
+        st.exception(exc)
     st.stop()
 
 required = {"player", "salary", "win_pct", "top10_pct", "make_cut_pct", "dk_points_proxy"}
