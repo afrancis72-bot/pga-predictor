@@ -1389,12 +1389,24 @@ def build_features(
         errors="coerce"
     )
 
+    # V10.1: course-fit ceiling. This supplements overall strength with the
+    # skills that create tournament-winning upside, while retaining putting risk.
+    recent_app = pd.to_numeric(p.get("form_sg_approach", p.get("sg_approach", pd.Series(np.nan, index=p.index))), errors="coerce")
+    season_app = pd.to_numeric(p.get("sg_approach", pd.Series(np.nan, index=p.index)), errors="coerce")
+    putting = pd.to_numeric(p.get("sg_putting", pd.Series(np.nan, index=p.index)), errors="coerce")
+    approach_course_weight = 0.30 + 0.10 * (1.0 - dna.get("green_small", 0.5))
+    p["course_fit_ceiling"] = (
+        approach_course_weight * zscore(season_app).fillna(0)
+        + 0.25 * zscore(recent_app).fillna(0)
+        + 0.20 * zscore(birdie).fillna(0)
+        + 0.10 * zscore(p["approach_fit"]).fillna(0)
+        + 0.10 * zscore(putting).fillna(0)
+        + 0.05 * np.clip(p["course_history_score"].to_numpy(float), -2.5, 2.5)
+    )
     p["ceiling_score"] = (
         p["strength_z"]
-        +
-        0.45 *
-        zscore(birdie)
-        .fillna(0)
+        + 0.30 * p["course_fit_ceiling"]
+        + 0.30 * zscore(birdie).fillna(0)
     )
 
     return (
@@ -1430,6 +1442,20 @@ def simulate(
     sd = p[
         "round_sd"
     ].to_numpy(float)
+
+    # V10.2: Course-Fit Ceiling is applied upstream, inside the tournament
+    # distribution rather than as an optimizer-only bonus. Positive fit lowers
+    # expected strokes modestly and receives a very small upside-dispersion bump.
+    # Both effects are bounded to prevent a course-fit score from dominating the
+    # golfer's underlying ability.
+    if "course_fit_ceiling" in p.columns:
+        cf = pd.to_numeric(p["course_fit_ceiling"], errors="coerce").fillna(0.0)
+        cf_sd = cf.std(ddof=0)
+        cf_z = ((cf - cf.mean()) / cf_sd).fillna(0.0) if cf_sd and not np.isnan(cf_sd) else pd.Series(0.0, index=p.index)
+        coverage = pd.to_numeric(p.get("course_fit_coverage", pd.Series(1.0, index=p.index)), errors="coerce").fillna(0.0).clip(0, 1)
+        fit_signal = cf_z.to_numpy(float) * coverage.to_numpy(float)
+        mu = mu + np.clip(-0.22 * fit_signal, -0.45, 0.45)
+        sd = sd * np.clip(1.0 + 0.025 * np.maximum(fit_signal, 0.0), 1.0, 1.06)
 
     # Four-round tournament simulation.
     course_shock = rng.normal(

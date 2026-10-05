@@ -3,6 +3,8 @@ import pandas as pd
 import streamlit as st
 
 from portfolio_optimizer import PortfolioSettings, optimize_portfolio
+from course_fit_ceiling import COURSE_PROFILES, add_course_fit_ceiling
+from course_fit_simulation import resimulate_with_course_fit_calibrated
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -49,12 +51,26 @@ if missing:
     st.error("Simulation CSV is missing required columns: " + ", ".join(missing))
     st.stop()
 
+# Experimental V10.1 Course-Fit Ceiling layer. It is transparent and can be
+# disabled so the frozen V10 baseline remains directly reproducible.
+st.sidebar.subheader("Course-Fit Monte Carlo (V10.2c)")
+use_course_fit = st.sidebar.toggle("Enable calibrated Course-Fit simulation", value=False, help="Reprices the frozen simulation using bounded course fit, then calibrates outputs back to the baseline V10 scale. Leave OFF to reproduce V10 exactly.")
+profile = st.sidebar.selectbox("Course profile", list(COURSE_PROFILES), index=0, disabled=not use_course_fit)
+
 # Merge the best available confidence field into the simulation table.
 if "model_data_confidence" not in mc.columns and not model.empty and "player" in model.columns:
     for conf_col in ["model_data_confidence_v10", "model_data_confidence_v9", "model_data_confidence_v8", "model_data_confidence"]:
         if conf_col in model.columns:
             mc = mc.merge(model[["player", conf_col]].rename(columns={conf_col: "model_data_confidence"}), on="player", how="left")
             break
+
+if use_course_fit and not model.empty and "player" in model.columns:
+    scored_model = add_course_fit_ceiling(model, profile)
+    fit_cols = ["player", "course_fit_ceiling", "course_fit_coverage", "course_fit_profile"]
+    # Reprice upstream, then calibrate back to the frozen simulation's marginal scale.
+    # The optimizer itself remains the original V10 optimizer: no direct course-fit bonus.
+    mc = resimulate_with_course_fit_calibrated(mc, scored_model, sims=50000, seed=42)
+    st.sidebar.caption("Course fit is applied upstream in 50,000 Monte Carlo simulations. Outputs are calibrated to the baseline V10 scale; the optimizer receives no separate course-fit bonus.")
 
 st.sidebar.success(f"{tournament_name} — {course_name}")
 st.sidebar.caption(f"Data: {mc_source}")
@@ -71,9 +87,9 @@ if page == "Model Dashboard":
     display_cols = [c for c in [
         "player", "salary", "win_pct", "top5_pct", "top10_pct", "top20_pct",
         "make_cut_pct", "expected_finish", "dk_points_proxy", "dk_value_per_1000",
-        "model_data_confidence"
+        "model_data_confidence", "course_fit_ceiling", "course_fit_coverage", "course_fit_profile"
     ] if c in mc.columns]
-    sort_options = [c for c in ["win_pct", "top10_pct", "make_cut_pct", "dk_points_proxy", "salary"] if c in mc.columns]
+    sort_options = [c for c in ["win_pct", "top10_pct", "make_cut_pct", "dk_points_proxy", "course_fit_ceiling", "salary"] if c in mc.columns]
     sort_col = st.selectbox("Sort by", sort_options)
     ascending = sort_col == "salary"
     st.dataframe(mc.sort_values(sort_col, ascending=ascending)[display_cols], use_container_width=True, hide_index=True)
@@ -83,7 +99,7 @@ else:
 
     a, b, c, d = st.columns(4)
     lineup_count = a.number_input("Lineups", 1, 20, 10)
-    max_exposure = b.slider("Max exposure", 0.10, 1.00, 0.60, 0.05)
+    max_exposure = b.slider("Max exposure", 0.10, 1.00, 0.50, 0.05)
     min_unique = c.number_input("Minimum unique golfers", 1, 5, 3)
     salary_floor = d.number_input("Minimum lineup salary", 40000, 50000, 46500, 100)
 
@@ -96,7 +112,7 @@ else:
     locks = st.multiselect("Lock golfers", names)
     excludes = st.multiselect("Exclude golfers", [n for n in names if n not in locks])
 
-    st.info("Production defaults: 60% max exposure, 3 minimum unique golfers, $6,500 player floor, $46,500 lineup floor.")
+    st.info("V10.3 production defaults: 50% max exposure for 20-max PGA portfolios, 3 minimum unique golfers, $6,500 player floor, and $46,500 lineup floor. Max exposure remains adjustable.")
 
     if st.button("Generate portfolio", type="primary"):
         settings = PortfolioSettings(
@@ -116,7 +132,7 @@ else:
                 lu = portfolio[portfolio.lineup == number]
                 salary = int(lu.salary.sum())
                 with st.expander(f"Lineup {number} — ${salary:,}", expanded=(number == 1)):
-                    cols = [c for c in ["player", "salary", "win_pct", "top10_pct", "make_cut_pct", "dk_points_proxy"] if c in lu.columns]
+                    cols = [c for c in ["player", "salary", "win_pct", "top10_pct", "make_cut_pct", "dk_points_proxy", "course_fit_ceiling"] if c in lu.columns]
                     st.dataframe(lu[cols], use_container_width=True, hide_index=True)
             st.subheader("Exposure")
             st.dataframe(exposure, use_container_width=True, hide_index=True)
