@@ -12,7 +12,7 @@ def render_showdown(base:pd.DataFrame):
     st.header("PGA Showdown V1.0")
     st.caption("Round-specific Monte Carlo: historical round affinity, Birdies-or-Better, bogey avoidance, course-weighted approach buckets, live underlying play, and Round-4 finishing position.")
     round_no=st.sidebar.selectbox("Showdown round",[1,2,3,4],index=0)
-    sims=st.sidebar.selectbox("Showdown simulations",[25000,50000,100000],index=1)
+    sims=st.sidebar.selectbox("Showdown simulations",[25000,50000,100000],index=0, help="25K is the fast working default. Use 100K for final lineup generation once inputs are set.")
     seed=st.sidebar.number_input("Showdown seed",1,999999,42)
     st.sidebar.subheader("Showdown Data")
     hist=st.sidebar.file_uploader("Historical round / scoring / approach CSV",type="csv",key="sd_hist")
@@ -26,10 +26,9 @@ def render_showdown(base:pd.DataFrame):
 
     hdf=pd.read_csv(hist) if hist is not None else pd.DataFrame()
     cdf=pd.read_csv(current) if current is not None else pd.DataFrame()
+    # Keep the base table clean. Historical/current files are merged exactly once
+    # inside the model so round-affinity columns cannot be duplicated or shadowed.
     enriched=base.copy()
-    if not hdf.empty:
-        extras=[c for c in hdf.columns if c!="player"]
-        enriched=enriched.merge(hdf[["player"]+extras].drop_duplicates("player"),on="player",how="left",suffixes=("","_hist"))
     st.sidebar.subheader("Course approach mix")
     st.sidebar.caption("Enter expected share of approach shots by distance. Values are normalized automatically.")
     defaults={"lt100":5,"100_125":10,"125_150":20,"150_175":25,"175_200":25,"200_plus":15}

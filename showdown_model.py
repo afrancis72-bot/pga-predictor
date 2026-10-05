@@ -51,6 +51,15 @@ def build_showdown_projections(base: pd.DataFrame, round_history: pd.DataFrame|N
     recent = _col(d,"recent_ball_striking") if "recent_ball_striking" in d else (_col(d,"recent5_sg_approach")+_col(d,"recent5_sg_ott"))/2
     d["baseline_skill_z"] = .45*_z(sg_total)+.25*_z(sg_app)+.15*_z(sg_ott)+.15*_z(recent)
 
+    # Merge historical specialty inputs exactly once.  The UI intentionally passes
+    # a clean base table; this keeps round splits, scoring style, and approach buckets
+    # available without duplicate _x/_y columns.
+    if round_history is not None and not round_history.empty and "player" in round_history:
+        h_all = round_history.drop_duplicates("player").copy()
+        extras = [c for c in h_all.columns if c != "player" and c not in d.columns]
+        if extras:
+            d = d.merge(h_all[["player"] + extras], on="player", how="left")
+
     # Historical round affinity, sample-size shrunk toward player's overall baseline.
     d["round_affinity_z"] = 0.0
     d["round_sample"] = 0
@@ -59,9 +68,6 @@ def build_showdown_projections(base: pd.DataFrame, round_history: pd.DataFrame|N
         rcol = f"r{s.round_number}_sg_total"
         ncol = f"r{s.round_number}_rounds"
         if "player" in h and rcol in h:
-            cols=["player",rcol]+([ncol] if ncol in h else [])
-            h=h[cols].drop_duplicates("player")
-            d=d.merge(h,on="player",how="left")
             n=_col(d,ncol,0) if ncol in d else pd.Series(12.0,index=d.index)
             # 20-round prior prevents small-sample round narratives from dominating.
             shrink=n/(n+20.0)
@@ -112,10 +118,10 @@ def build_showdown_projections(base: pd.DataFrame, round_history: pd.DataFrame|N
     skill=d.round_strength.to_numpy(float)
     # Volatility is intentionally material in one-round golf; stronger birdie profiles get fatter upside.
     upside=np.clip(d.scoring_style_z.to_numpy(float),-2.5,2.5)
-    field=rng.normal(0,.28,size=(s.sims,1))
-    indiv=rng.normal(0,1.0,size=(s.sims,n))
-    tail=rng.standard_t(df=5,size=(s.sims,n))*.16
-    perf=skill[None,:]+field+indiv+tail*(1+.10*np.maximum(upside,0))[None,:]
+    field=rng.normal(0,.28,size=(s.sims,1)).astype(np.float32)
+    indiv=rng.normal(0,1.0,size=(s.sims,n)).astype(np.float32)
+    tail=(rng.standard_t(df=5,size=(s.sims,n))*.16).astype(np.float32)
+    perf=(skill[None,:]+field+indiv+tail*(1+.10*np.maximum(upside,0))[None,:]).astype(np.float32)
 
     # Translate latent performance into birdies/bogeys and DK-like round points.
     birdie_rate=np.clip(3.55+.72*perf+.30*upside[None,:],.2,9.0)
