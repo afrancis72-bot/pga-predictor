@@ -104,15 +104,17 @@ elif st.session_state.selected_course_id:
 else:
     weather = load_repo_csv("weather.csv"); weather_source = "repository fallback" if not weather.empty else "not supplied"
 
-if players.empty:
-    st.error("Upload the current DraftKings field. V10.6 will not build a live slate from a stale/missing player pool.")
-    st.stop()
-if "player" not in players.columns or "salary" not in players.columns:
-    st.error("DraftKings players.csv must contain 'player' and 'salary' columns.")
-    st.stop()
+dk_ready = (players_up is not None and not players.empty and {"player", "salary"}.issubset(players.columns))
+if players_up is None:
+    st.sidebar.info("DK field: not uploaded yet — course/weather lookup is still available")
+elif players.empty:
+    st.sidebar.error("DK field: uploaded file is empty")
+elif not {"player", "salary"}.issubset(players.columns):
+    st.sidebar.error("DK field: needs 'player' and 'salary' columns")
 
 st.sidebar.subheader("Data integrity")
-st.sidebar.success(f"DK field: uploaded ({len(players)} golfers)") if players_up is not None else st.sidebar.warning("DK field: repository fallback — upload current slate before a real run")
+if dk_ready:
+    st.sidebar.success(f"DK field: uploaded ({len(players)} golfers)")
 for name, up, df in [("player_stats.csv",stats_up,player_stats),("results.csv",results_up,results),("course_history.csv",history_up,history)]:
     if up is not None: st.sidebar.success(f"{name}: uploaded")
     elif not df.empty: st.sidebar.warning(f"{name}: repository fallback")
@@ -125,15 +127,11 @@ def tournament_coverage(df):
     if df.empty or "tournament" not in df.columns: return None
     vals=df["tournament"].dropna().astype(str).str.strip().str.casefold()
     return bool((vals == tournament_name.strip().casefold()).any())
+coverage_errors=[]
 for label, df in [("course_history.csv",history),("course_holes.csv",holes),("weather.csv",weather)]:
     match=tournament_coverage(df)
     if match is False:
-        st.error(f"{label} has a tournament column but no rows for '{tournament_name}'. Replace/refresh that input before running.")
-        st.stop()
-
-if players_up is None:
-    st.error("Current DraftKings upload is required for a production run. Repository players.csv is diagnostic only.")
-    st.stop()
+        coverage_errors.append(f"{label} has a tournament column but no rows for '{tournament_name}'.")
 
 st.sidebar.success(f"{tournament_name} — {course_query}")
 sims=st.sidebar.selectbox("Monte Carlo simulations",[25000,50000,100000],index=1)
@@ -152,13 +150,23 @@ with st.expander("V10.6 source coverage", expanded=True):
 if "prediction" not in st.session_state: st.session_state.prediction=None; st.session_state.prediction_key=None
 run_key=(tournament_name,course_query,str(tournament_start),sims,getattr(players_up,"name",None),getattr(stats_up,"name",None),getattr(results_up,"name",None),getattr(history_up,"name",None),holes_source,weather_source,st.session_state.selected_course_id)
 if st.button("Build current-week projections", type="primary"):
-    try:
+    if players_up is None:
+        st.error("Upload the current DraftKings field before building projections.")
+    elif players.empty:
+        st.error("The uploaded DraftKings file is empty.")
+    elif not {"player", "salary"}.issubset(players.columns):
+        st.error("DraftKings players.csv must contain 'player' and 'salary' columns.")
+    elif coverage_errors:
+        for msg in coverage_errors:
+            st.error(msg + " Replace/refresh that input before running.")
+    else:
+      try:
         with st.spinner(f"Running {sims:,} tournament simulations..."):
             pred=predict_from_dataframes(Config(tournament=tournament_name,sims=int(sims),seed=42),players,player_stats,results,history,holes,weather)
             pred=pred.rename(columns={"dk_proxy":"dk_points_proxy"})
             st.session_state.prediction=pred; st.session_state.prediction_key=run_key
         st.success(f"Built projections for {len(pred)} golfers using {sims:,} simulations.")
-    except Exception as exc: st.error(str(exc))
+      except Exception as exc: st.error(str(exc))
 
 mc=st.session_state.prediction
 if mc is None:
