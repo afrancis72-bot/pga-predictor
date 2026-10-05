@@ -9,7 +9,7 @@ from pga_predictor_pro import Config, predict_from_dataframes
 
 ROOT = Path(__file__).resolve().parent
 st.set_page_config(page_title="PGA Predictor Pro", page_icon="⛳", layout="wide")
-st.title("⛳ PGA Predictor Pro — Tournament Model V10.6.4b")
+st.title("⛳ PGA Predictor Pro — Tournament Model V10.6.4c")
 st.caption("$0 multi-source international course/weather ingestion + manual DraftKings field + frozen tournament model/optimizer")
 
 @st.cache_data
@@ -19,6 +19,51 @@ def load_repo_csv(name):
 
 def load_weekly(upload, name):
     return pd.read_csv(upload) if upload is not None else load_repo_csv(name)
+
+def validate_advanced_input(df, kind):
+    """Validate optional advanced inputs without changing model logic.
+
+    Repository fallbacks that do not satisfy the current contract are ignored
+    instead of crashing a weekly build. Explicit uploads remain visible errors.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(), "not supplied"
+
+    work = df.copy()
+    work.columns = [str(c).replace("\ufeff", "").strip() for c in work.columns]
+    lower = {c.casefold(): c for c in work.columns}
+
+    required = {
+        "player_stats": {"player"},
+        "results": {"player", "date"},
+        "course_history": {"player"},
+    }[kind]
+
+    missing = [c for c in required if c not in lower]
+    if missing:
+        return pd.DataFrame(), "incompatible: missing " + ", ".join(missing)
+
+    # Normalize required identity/date column casing when necessary.
+    ren = {}
+    for req in required:
+        actual = lower[req]
+        if actual != req:
+            ren[actual] = req
+    if ren:
+        work = work.rename(columns=ren)
+
+    if "player" in work.columns:
+        work["player"] = work["player"].astype(str).str.strip()
+        work = work[~work["player"].str.casefold().isin({"", "nan", "none", "player", "name"})].copy()
+
+    if kind == "results":
+        work["date"] = pd.to_datetime(work["date"], errors="coerce")
+        work = work[work["date"].notna()].copy()
+        if work.empty:
+            return pd.DataFrame(), "incompatible: no valid dated result rows"
+
+    return work.reset_index(drop=True), "valid"
+
 
 def normalize_dk_players(df):
     """Accept native DraftKings PGA salary exports or the app's normalized players.csv."""
@@ -158,9 +203,16 @@ if not tournament_name.strip() or not course_query.strip():
 
 players_raw = load_weekly(players_up, "players.csv")
 players, dk_format = normalize_dk_players(players_raw)
-player_stats = load_weekly(stats_up, "player_stats.csv")
-results = load_weekly(results_up, "results.csv")
-history = load_weekly(history_up, "course_history.csv")
+player_stats_raw = load_weekly(stats_up, "player_stats.csv")
+results_raw = load_weekly(results_up, "results.csv")
+history_raw = load_weekly(history_up, "course_history.csv")
+
+player_stats, stats_status = validate_advanced_input(player_stats_raw, "player_stats")
+results, results_status = validate_advanced_input(results_raw, "results")
+history, history_status = validate_advanced_input(history_raw, "course_history")
+
+# Invalid repository fallbacks are deliberately treated as absent. An explicit
+# upload with a bad schema is still surfaced to the user below.
 
 # Course holes: explicit upload > selected open source > repository fallback.
 if holes_up is not None:
@@ -205,10 +257,22 @@ elif players.empty:
 st.sidebar.subheader("Data integrity")
 if dk_ready:
     st.sidebar.success(f"DK field: {len(players)} golfers ✓ ({dk_format})")
-for name, up, df in [("player_stats.csv",stats_up,player_stats),("results.csv",results_up,results),("course_history.csv",history_up,history)]:
-    if up is not None: st.sidebar.success(f"{name}: uploaded")
-    elif not df.empty: st.sidebar.warning(f"{name}: repository fallback")
-    else: st.sidebar.info(f"{name}: not supplied")
+advanced_rows = [
+    ("player_stats.csv", stats_up, player_stats, stats_status),
+    ("results.csv", results_up, results, results_status),
+    ("course_history.csv", history_up, history, history_status),
+]
+for name, up, df, status in advanced_rows:
+    if up is not None and status == "valid":
+        st.sidebar.success(f"{name}: uploaded ✓")
+    elif up is not None:
+        st.sidebar.error(f"{name}: {status}")
+    elif status == "valid" and not df.empty:
+        st.sidebar.warning(f"{name}: repository fallback (unverified)")
+    elif status.startswith("incompatible"):
+        st.sidebar.warning(f"{name}: ignored repository fallback — {status}")
+    else:
+        st.sidebar.info(f"{name}: not supplied")
 (st.sidebar.success if holes_source in ("uploaded","Golf Courses API") else st.sidebar.warning)(f"course_holes: {holes_source}")
 (st.sidebar.success if weather_source in ("uploaded","Open-Meteo") else st.sidebar.warning)(f"weather: {weather_source}")
 
@@ -227,15 +291,28 @@ st.sidebar.success(f"{tournament_name} — {course_query}")
 sims=st.sidebar.selectbox("Monte Carlo simulations",[25000,50000,100000],index=1)
 
 # Make the limitations visible rather than silently implying full automation.
-with st.expander("V10.6.4b source coverage", expanded=True):
+with st.expander("V10.6.4c source coverage", expanded=True):
     c1,c2,c3,c4=st.columns(4)
     c1.metric("DK field", f"{len(players)} golfers ✓" if dk_ready else "Awaiting upload")
     c2.metric("Course/holes", "Scorecard auto ✓" if holes_source=="Golf Courses API" else holes_source)
     c3.metric("Weather", "Auto ✓" if weather_source=="Open-Meteo" else weather_source)
-    advanced_fresh=sum(x is not None for x in (stats_up,results_up,history_up))
+    advanced_fresh=sum([
+        stats_up is not None and stats_status == "valid",
+        results_up is not None and results_status == "valid",
+        history_up is not None and history_status == "valid",
+    ])
+    usable_advanced=sum([
+        not player_stats.empty,
+        not results.empty,
+        not history.empty,
+    ])
     c4.metric("Advanced stats/form/history", f"{advanced_fresh}/3 fresh uploads")
     if advanced_fresh < 3:
-        st.warning("Advanced player stats/results/course history are not fully automated at $0 yet. Repository fallbacks can be used for testing, but should not be treated as current-week data unless you have verified them.")
+        st.warning(
+            f"Advanced player stats/results/course history are not fully automated at $0 yet. "
+            f"{usable_advanced}/3 usable advanced inputs are currently available. "
+            "Incompatible repository fallbacks are ignored rather than silently entering the model."
+        )
 
 if "prediction" not in st.session_state: st.session_state.prediction=None; st.session_state.prediction_key=None
 run_key=(tournament_name,course_query,str(tournament_start),sims,getattr(players_up,"name",None),getattr(stats_up,"name",None),getattr(results_up,"name",None),getattr(history_up,"name",None),holes_source,weather_source,st.session_state.selected_course_id, selected_course.get("source") if selected_course else None)
@@ -248,6 +325,12 @@ if st.button("Build current-week projections", type="primary"):
         st.error("Unrecognized DraftKings format. Upload the untouched PGA DKSalaries CSV or a normalized players.csv.")
     elif players.empty:
         st.error("No valid golfer rows were found after DraftKings normalization.")
+    elif stats_up is not None and stats_status != "valid":
+        st.error(f"Uploaded player_stats.csv is {stats_status}.")
+    elif results_up is not None and results_status != "valid":
+        st.error(f"Uploaded results.csv is {results_status}.")
+    elif history_up is not None and history_status != "valid":
+        st.error(f"Uploaded course_history.csv is {history_status}.")
     elif coverage_errors:
         for msg in coverage_errors:
             st.error(msg + " Replace/refresh that input before running.")
@@ -291,4 +374,4 @@ else:
         except Exception as exc: st.error(str(exc))
 
 st.divider()
-st.caption("V10.6.4b ingestion release. Course data: Golf Courses API when available; global location fallback: OpenStreetMap/Nominatim; weather: Open-Meteo. Predictive model/optimizer unchanged. OpenStreetMap data © OpenStreetMap contributors, ODbL.")
+st.caption("V10.6.4c ingestion release. Course data: Golf Courses API when available; global location fallback: OpenStreetMap/Nominatim; weather: Open-Meteo. Predictive model/optimizer unchanged. OpenStreetMap data © OpenStreetMap contributors, ODbL.")
