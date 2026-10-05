@@ -10,8 +10,8 @@ from pga_predictor_pro import Config, predict_from_dataframes
 
 ROOT = Path(__file__).resolve().parent
 st.set_page_config(page_title="PGA Predictor Pro", page_icon="⛳", layout="wide")
-st.title("⛳ PGA Predictor Pro — Tournament Model V10.6.5")
-st.caption("$0 multi-source international course/weather ingestion + manual DraftKings field + frozen tournament model/optimizer")
+st.title("⛳ PGA Predictor Pro — Tournament Model V10.6.6")
+st.caption("$0 course/weather ingestion + DraftKings field + OTIS Advanced Course-Fit player layer")
 
 @st.cache_data
 def load_repo_csv(name):
@@ -70,6 +70,48 @@ def _clean_cols(df):
     out = df.copy()
     out.columns = [str(c).replace("\ufeff", "").strip() for c in out.columns]
     return out
+
+
+def normalize_otis_course_fit(df):
+    """Normalize OTIS Advanced Course-Fit export for the current weekly field.
+
+    Rank and Model are retained for audit only and are never used as predictive inputs.
+    OTIS component scores are within-field percentiles, so they are used only within
+    the current tournament field. Missing values remain missing.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(), "empty"
+    w = _clean_cols(df)
+    lookup = {c.casefold(): c for c in w.columns}
+    required = ["player", "true skill", "course fit", "form"]
+    missing = [c for c in required if c not in lookup]
+    if missing:
+        return pd.DataFrame(), "unrecognized OTIS Course-Fit CSV (missing " + ", ".join(missing) + ")"
+    ren = {
+        lookup["player"]: "player",
+        lookup["true skill"]: "otis_true_skill",
+        lookup["course fit"]: "otis_course_fit",
+        lookup["form"]: "otis_form",
+    }
+    optional = {
+        "rank": "otis_rank", "model": "otis_model_audit",
+        "fit: app": "otis_fit_app", "fit: ott": "otis_fit_ott",
+        "fit: arg": "otis_fit_arg", "fit: putt": "otis_fit_putt",
+        "fit: history": "otis_fit_history", "form rds": "otis_form_rds",
+        "venue rds": "otis_venue_rds",
+    }
+    for src, dst in optional.items():
+        if src in lookup: ren[lookup[src]] = dst
+    w = w.rename(columns=ren)
+    keep = [c for c in ["player", "otis_rank", "otis_model_audit", "otis_true_skill", "otis_course_fit", "otis_form", "otis_fit_app", "otis_fit_ott", "otis_fit_arg", "otis_fit_putt", "otis_fit_history", "otis_form_rds", "otis_venue_rds"] if c in w.columns]
+    w = w[keep].copy()
+    w["player"] = w["player"].astype(str).str.strip()
+    for c in keep:
+        if c != "player": w[c] = pd.to_numeric(w[c], errors="coerce")
+    w = w[~w["player"].str.casefold().isin({"", "nan", "none", "player", "name"})].copy()
+    w = w.drop_duplicates(subset=["player"], keep="first").reset_index(drop=True)
+    advanced = all(c in w.columns for c in ["otis_fit_app","otis_fit_ott","otis_fit_arg","otis_fit_putt","otis_fit_history","otis_form_rds","otis_venue_rds"])
+    return w, ("OTIS Advanced Course-Fit" if advanced else "OTIS Course-Fit")
 
 def normalize_otis_season_stats(df, target_season=2026):
     """Normalize an OTIS Season stats CSV into player_stats.csv-compatible rows."""
@@ -273,9 +315,8 @@ if st.session_state.course_matches:
     st.sidebar.success(f"Course identity ready via {selected_course.get('source','online source')}")
 
 st.sidebar.subheader("OTIS Golf data")
-st.sidebar.caption("OTIS provides free CSV exports. Upload Season stats + Event results; the app normalizes them and derives course history when the course is present. OTIS terms prohibit hammering the site with automated requests, so V10.6.5 uses the supported export workflow rather than scraping.")
-otis_stats_up = st.sidebar.file_uploader("OTIS — Season stats CSV", type="csv", key="otis_stats")
-otis_results_up = st.sidebar.file_uploader("OTIS — Event results CSV", type="csv", key="otis_results")
+st.sidebar.caption("Upload the weekly OTIS Course-Fit CSV exported from Model → Course fit → Advanced. The app uses True Skill, Course Fit and Form; OTIS Rank/Model are audit-only and never drive projections.")
+otis_fit_up = st.sidebar.file_uploader("OTIS — Advanced Course-Fit CSV", type="csv", key="otis_fit")
 
 st.sidebar.subheader("Advanced model inputs")
 st.sidebar.caption("Optional direct overrides. Use these only if you already have model-contract CSVs.")
@@ -292,17 +333,15 @@ if not tournament_name.strip() or not course_query.strip():
 players_raw = load_weekly(players_up, "players.csv")
 players, dk_format = normalize_dk_players(players_raw)
 # Advanced-data precedence:
-# explicit model-contract override > OTIS export > repository fallback.
-otis_stats_raw = pd.read_csv(otis_stats_up) if otis_stats_up is not None else pd.DataFrame()
-otis_results_raw = pd.read_csv(otis_results_up) if otis_results_up is not None else pd.DataFrame()
-otis_stats, otis_stats_status = normalize_otis_season_stats(otis_stats_raw, 2026)
-otis_results, otis_results_status = normalize_otis_event_results(otis_results_raw)
+# explicit model-contract override > OTIS weekly Course-Fit export > repository fallback.
+otis_fit_raw = pd.read_csv(otis_fit_up) if otis_fit_up is not None else pd.DataFrame()
+otis_fit, otis_fit_status = normalize_otis_course_fit(otis_fit_raw)
 
 if stats_up is not None:
     player_stats_raw = pd.read_csv(stats_up)
     player_stats, stats_status = validate_advanced_input(player_stats_raw, "player_stats")
-elif not otis_stats.empty:
-    player_stats, stats_status = otis_stats, otis_stats_status
+elif not otis_fit.empty:
+    player_stats, stats_status = otis_fit, otis_fit_status
 else:
     player_stats_raw = load_repo_csv("player_stats.csv")
     player_stats, stats_status = validate_advanced_input(player_stats_raw, "player_stats")
@@ -310,8 +349,6 @@ else:
 if results_up is not None:
     results_raw = pd.read_csv(results_up)
     results, results_status = validate_advanced_input(results_raw, "results")
-elif not otis_results.empty:
-    results, results_status = otis_results, otis_results_status
 else:
     results_raw = load_repo_csv("results.csv")
     results, results_status = validate_advanced_input(results_raw, "results")
@@ -319,8 +356,6 @@ else:
 if history_up is not None:
     history_raw = pd.read_csv(history_up)
     history, history_status = validate_advanced_input(history_raw, "course_history")
-elif not otis_results.empty:
-    history, history_status = build_course_history_from_otis(otis_results, course_query)
 else:
     history_raw = load_repo_csv("course_history.csv")
     history, history_status = validate_advanced_input(history_raw, "course_history")
@@ -372,15 +407,15 @@ st.sidebar.subheader("Data integrity")
 if dk_ready:
     st.sidebar.success(f"DK field: {len(players)} golfers ✓ ({dk_format})")
 advanced_rows = [
-    ("player_stats", stats_up, otis_stats_up, player_stats, stats_status),
-    ("results", results_up, otis_results_up, results, results_status),
-    ("course_history", history_up, otis_results_up, history, history_status),
+    ("player layer", stats_up, otis_fit_up, player_stats, stats_status),
+    ("results", results_up, None, results, results_status),
+    ("course_history", history_up, None, history, history_status),
 ]
 for name, override_up, otis_up, df, status in advanced_rows:
     if override_up is not None and not df.empty:
         st.sidebar.success(f"{name}: direct override ✓")
     elif otis_up is not None and not df.empty:
-        st.sidebar.success(f"{name}: OTIS ✓")
+        st.sidebar.success(f"{name}: {status} ✓ ({len(df)} golfers)")
     elif override_up is not None or otis_up is not None:
         st.sidebar.error(f"{name}: {status}")
     elif status == "valid" and not df.empty:
@@ -391,6 +426,19 @@ for name, override_up, otis_up, df, status in advanced_rows:
         st.sidebar.info(f"{name}: not supplied")
 (st.sidebar.success if holes_source in ("uploaded","Golf Courses API") else st.sidebar.warning)(f"course_holes: {holes_source}")
 (st.sidebar.success if weather_source in ("uploaded","Open-Meteo") else st.sidebar.warning)(f"weather: {weather_source}")
+
+# Exact-name field coverage check after both weekly files are normalized.
+otis_match_count = 0
+otis_unmatched = []
+if dk_ready and not otis_fit.empty:
+    dk_names = set(players["player"].astype(str).str.strip().str.casefold())
+    otis_names = set(otis_fit["player"].astype(str).str.strip().str.casefold())
+    otis_match_count = len(dk_names & otis_names)
+    otis_unmatched = sorted(dk_names - otis_names)
+    if otis_match_count == len(dk_names):
+        st.sidebar.success(f"DK ↔ OTIS match: {otis_match_count}/{len(dk_names)} ✓")
+    else:
+        st.sidebar.warning(f"DK ↔ OTIS match: {otis_match_count}/{len(dk_names)}; {len(otis_unmatched)} unmatched")
 
 # Prevent a stale keyed file from silently masquerading as this week's tournament.
 def tournament_coverage(df):
@@ -407,31 +455,21 @@ st.sidebar.success(f"{tournament_name} — {course_query}")
 sims=st.sidebar.selectbox("Monte Carlo simulations",[25000,50000,100000],index=1)
 
 # Make the limitations visible rather than silently implying full automation.
-with st.expander("V10.6.5 source coverage", expanded=True):
+with st.expander("V10.6.6 source coverage", expanded=True):
     c1,c2,c3,c4=st.columns(4)
     c1.metric("DK field", f"{len(players)} golfers ✓" if dk_ready else "Awaiting upload")
     c2.metric("Course/holes", "Scorecard auto ✓" if holes_source=="Golf Courses API" else holes_source)
     c3.metric("Weather", "Auto ✓" if weather_source=="Open-Meteo" else weather_source)
-    advanced_fresh=sum([
-        (stats_up is not None and stats_status == "valid") or (otis_stats_up is not None and not otis_stats.empty),
-        (results_up is not None and results_status == "valid") or (otis_results_up is not None and not otis_results.empty),
-        (history_up is not None and history_status == "valid") or (otis_results_up is not None and not history.empty),
-    ])
-    usable_advanced=sum([
-        not player_stats.empty,
-        not results.empty,
-        not history.empty,
-    ])
-    c4.metric("Advanced stats/form/history", f"{advanced_fresh}/3 fresh uploads")
-    if advanced_fresh < 3:
-        st.warning(
-            f"Advanced player stats/results/course history are not fully automated at $0 yet. "
-            f"{usable_advanced}/3 usable advanced inputs are currently available. "
-            "Incompatible repository fallbacks are ignored rather than silently entering the model."
-        )
+    c4.metric("OTIS player layer", f"{otis_match_count}/{len(players)} matched" if dk_ready and not otis_fit.empty else ("Uploaded" if not otis_fit.empty else "Awaiting upload"))
+    if otis_fit_up is None:
+        st.warning("Upload the weekly OTIS Advanced Course-Fit CSV before treating projections as production-ready.")
+    elif dk_ready and otis_match_count < len(players):
+        st.warning("OTIS does not match every DK golfer. Unmatched golfers receive no OTIS signal; review names before production use.")
+    elif dk_ready:
+        st.success("Weekly player layer complete: DK field and OTIS Advanced Course-Fit match across the full field.")
 
 if "prediction" not in st.session_state: st.session_state.prediction=None; st.session_state.prediction_key=None
-run_key=(tournament_name,course_query,str(tournament_start),sims,getattr(players_up,"name",None),getattr(stats_up,"name",None),getattr(results_up,"name",None),getattr(history_up,"name",None),holes_source,weather_source,st.session_state.selected_course_id, selected_course.get("source") if selected_course else None)
+run_key=(tournament_name,course_query,str(tournament_start),sims,getattr(players_up,"name",None),getattr(otis_fit_up,"name",None),getattr(stats_up,"name",None),getattr(results_up,"name",None),getattr(history_up,"name",None),holes_source,weather_source,st.session_state.selected_course_id, selected_course.get("source") if selected_course else None)
 if st.button("Build current-week projections", type="primary"):
     if players_up is None:
         st.error("Upload the current DraftKings field before building projections.")
@@ -441,10 +479,12 @@ if st.button("Build current-week projections", type="primary"):
         st.error("Unrecognized DraftKings format. Upload the untouched PGA DKSalaries CSV or a normalized players.csv.")
     elif players.empty:
         st.error("No valid golfer rows were found after DraftKings normalization.")
-    elif otis_stats_up is not None and otis_stats.empty:
-        st.error(f"OTIS Season stats CSV could not be used: {otis_stats_status}.")
-    elif otis_results_up is not None and otis_results.empty:
-        st.error(f"OTIS Event results CSV could not be used: {otis_results_status}.")
+    elif otis_fit_up is None:
+        st.error("Upload the OTIS Advanced Course-Fit CSV before building production projections.")
+    elif otis_fit.empty:
+        st.error(f"OTIS Course-Fit CSV could not be used: {otis_fit_status}.")
+    elif otis_match_count < len(players):
+        st.error(f"OTIS matches {otis_match_count}/{len(players)} DK golfers. Resolve the unmatched names before building projections.")
     elif stats_up is not None and stats_status != "valid":
         st.error(f"Uploaded player_stats.csv is {stats_status}.")
     elif results_up is not None and results_status != "valid":
@@ -494,4 +534,4 @@ else:
         except Exception as exc: st.error(str(exc))
 
 st.divider()
-st.caption("V10.6.5 OTIS import release. Course data: Golf Courses API when available; global location fallback: OpenStreetMap/Nominatim; weather: Open-Meteo. Predictive model/optimizer unchanged. OpenStreetMap data © OpenStreetMap contributors, ODbL.")
+st.caption("V10.6.6 OTIS Advanced Course-Fit release. Course data: Golf Courses API when available; global location fallback: OpenStreetMap/Nominatim; weather: Open-Meteo. Predictive model/optimizer unchanged. OpenStreetMap data © OpenStreetMap contributors, ODbL.")

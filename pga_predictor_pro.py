@@ -1334,6 +1334,43 @@ def build_features(
 
         p["owgr_used"] = owgr
         p["owgr_strength"] = owgr_z
+    # V10.6.6: weekly OTIS Advanced Course-Fit player layer.
+    # OTIS Rank and OTIS Model are deliberately excluded. We use only the
+    # decomposed within-field signals: True Skill, Course Fit and Form.
+    # The scores are percentile ranks for THIS field, so z-scoring here keeps
+    # them relative and avoids pretending they are strokes gained.
+    if "otis_true_skill" in p.columns:
+        true_skill = pd.to_numeric(p["otis_true_skill"], errors="coerce")
+        form = pd.to_numeric(p.get("otis_form", pd.Series(np.nan, index=p.index)), errors="coerce")
+        fit = pd.to_numeric(p.get("otis_course_fit", pd.Series(np.nan, index=p.index)), errors="coerce")
+        form_rds = pd.to_numeric(p.get("otis_form_rds", pd.Series(np.nan, index=p.index)), errors="coerce")
+        venue_rds = pd.to_numeric(p.get("otis_venue_rds", pd.Series(np.nan, index=p.index)), errors="coerce")
+
+        # Confidence shrinkage is applied to the two more sample-sensitive layers.
+        # True Skill already includes OTIS's own thin-sample shrinkage.
+        form_rel = (form_rds / (form_rds + 24.0)).fillna(0.50).clip(0, 1)
+        venue_rel = (venue_rds / (venue_rds + 8.0)).fillna(0.0).clip(0, 1)
+        form_center = form.median(skipna=True) if form.notna().any() else 50.0
+        fit_center = fit.median(skipna=True) if fit.notna().any() else 50.0
+        form_adj = form_center + form_rel * (form - form_center)
+
+        # Course Fit already contains APP/OTT/ARG/PUTT/History. Reduce its
+        # confidence modestly when venue history is absent without erasing the
+        # non-history components (80% of OTIS's published fit construction).
+        fit_conf = 0.80 + 0.20 * venue_rel
+        fit_adj = fit_center + fit_conf * (fit - fit_center)
+
+        p["otis_form_adjusted"] = form_adj
+        p["otis_course_fit_adjusted"] = fit_adj
+        p["otis_form_reliability"] = form_rel
+        p["otis_venue_reliability"] = venue_rel
+
+        # Baseline player quality is the anchor. Form and course fit are bounded
+        # tilts; this avoids recreating OTIS's 45/35/20 Model score.
+        score += 1.00 * zscore(true_skill).fillna(0).to_numpy()
+        score += 0.25 * zscore(form_adj).fillna(0).to_numpy()
+        score += 0.20 * zscore(fit_adj).fillna(0).to_numpy()
+
     # Final model strength.
     p["model_strength"] = score
 

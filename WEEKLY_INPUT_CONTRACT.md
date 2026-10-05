@@ -37,3 +37,14 @@ The app supports user-triggered OTIS Golf CSV exports; it does not scrape or aut
 2. Export **Event results** for the same players. The app uses this as recent-results input and derives current-course history when the export includes the current venue.
 3. Blank OTIS values remain missing; they are never converted to zero.
 4. Direct model-contract uploads override OTIS; OTIS overrides repository fallbacks.
+
+## V10.6.6 — OTIS Advanced Course-Fit weekly player layer
+
+Production weekly player input is the CSV exported from OTIS Golf: Model → Course fit → Advanced → Export CSV.
+
+Required columns: Player, True Skill, Course Fit, Form.
+Recommended advanced columns: Fit: APP, Fit: OTT, Fit: ARG, Fit: PUTT, Fit: History, Form rds, Venue rds.
+
+The app deliberately does not use OTIS Rank or OTIS Model as predictive inputs. They may be retained for audit only. True Skill anchors player quality; Form and Course Fit enter as bounded, sample-aware tilts. Form rds and Venue rds are used for reliability shrinkage. Missing values remain missing rather than being converted to zero.
+
+The current DraftKings salary CSV remains the authority for the contest field and salary. The app requires a full DK-to-OTIS name match before building production projections.
