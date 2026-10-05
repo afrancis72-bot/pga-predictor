@@ -9,7 +9,7 @@ from pga_predictor_pro import Config, predict_from_dataframes
 
 ROOT = Path(__file__).resolve().parent
 st.set_page_config(page_title="PGA Predictor Pro", page_icon="⛳", layout="wide")
-st.title("⛳ PGA Predictor Pro — Tournament Model V10.6.3a")
+st.title("⛳ PGA Predictor Pro — Tournament Model V10.6.4")
 st.caption("$0 multi-source international course/weather ingestion + manual DraftKings field + frozen tournament model/optimizer")
 
 @st.cache_data
@@ -78,7 +78,7 @@ if st.sidebar.button("Find course online"):
                 else "Global OpenStreetMap location lookup used."
             )
             if not osm_matches:
-                st.session_state.course_lookup_note = "No match from either available course/location source."
+                st.session_state.course_lookup_note = "No match after course database + automatic global alias/location search."
     except Exception as exc:
         st.session_state.course_lookup_note = f"Lookup failed: {exc}"
 
@@ -173,7 +173,7 @@ st.sidebar.success(f"{tournament_name} — {course_query}")
 sims=st.sidebar.selectbox("Monte Carlo simulations",[25000,50000,100000],index=1)
 
 # Make the limitations visible rather than silently implying full automation.
-with st.expander("V10.6.3a source coverage", expanded=True):
+with st.expander("V10.6.4 source coverage", expanded=True):
     c1,c2,c3,c4=st.columns(4)
     c1.metric("DK field", "Uploaded ✓" if dk_ready else "Awaiting upload")
     c2.metric("Course/holes", "Scorecard auto ✓" if holes_source=="Golf Courses API" else holes_source)
@@ -235,4 +235,4 @@ else:
         except Exception as exc: st.error(str(exc))
 
 st.divider()
-st.caption("V10.6.3a ingestion release. Course data: Golf Courses API when available; global location fallback: OpenStreetMap/Nominatim; weather: Open-Meteo. Predictive model/optimizer unchanged. OpenStreetMap data © OpenStreetMap contributors, ODbL.")
+st.caption("V10.6.4 ingestion release. Course data: Golf Courses API when available; global location fallback: OpenStreetMap/Nominatim; weather: Open-Meteo. Predictive model/optimizer unchanged. OpenStreetMap data © OpenStreetMap contributors, ODbL.")

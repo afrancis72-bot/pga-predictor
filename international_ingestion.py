@@ -10,12 +10,13 @@ from datetime import date, timedelta
 from difflib import SequenceMatcher
 from typing import Any
 import re
+import time
 import requests
 import pandas as pd
 
 GCA = "https://www.golfcoursesapi.com/api/v1"
 OPEN_METEO = "https://api.open-meteo.com/v1/forecast"
-UA = "PGA-Predictor-V10.6.3/1.0 (personal golf research app)"
+UA = "PGA-Predictor-V10.6.4/1.0 (personal golf research app)"
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
 
 class IngestionError(RuntimeError):
@@ -99,14 +100,43 @@ def search_courses(query: str, api_key: str, country_hint: str = "", limit: int 
     return out[:limit]
 
 
-def geocode_course(query: str, country_hint: str = "", limit: int = 5) -> list[dict]:
-    """One-off, user-triggered OSM Nominatim fallback. Cached by Streamlit caller.
+def _alias_queries(query: str) -> list[str]:
+    """Generate conservative venue-name variants for renamed/resort courses.
 
-    This intentionally makes ONE search request per user action and does not
-    autocomplete, bulk-query, or scrape Nominatim details.
+    No location is invented here; variants only simplify the supplied name.
+    This is useful for marketing names such as "VidantaWorld Vallarta Course"
+    where map databases may still store "Vidanta Vallarta".
     """
-    if not query.strip():
-        raise IngestionError("Enter a course name before searching.")
+    raw = " ".join(str(query or "").split())
+    if not raw:
+        return []
+    variants = [raw]
+    # Split CamelCase branding (VidantaWorld -> Vidanta World), then try both
+    # with generic golf suffixes removed and common "World" rebrand token removed.
+    split = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", raw)
+    variants.append(split)
+    for base in (raw, split):
+        cleaned = re.sub(r"\b(golf\s+course|country\s+club|golf\s+club|course|club)\b", " ", base, flags=re.I)
+        cleaned = " ".join(cleaned.split())
+        if cleaned:
+            variants.append(cleaned)
+        debranded = re.sub(r"\bworld\b", " ", cleaned, flags=re.I)
+        debranded = " ".join(debranded.split())
+        if debranded:
+            variants.append(debranded)
+    # A few providers concatenate a rebrand token into the preceding brand.
+    # Removing a terminal 'World' component is deterministic, not venue-specific.
+    variants.append(re.sub(r"(?i)world\b", "", split).strip())
+    out=[]; seen=set()
+    for v in variants:
+        v=" ".join(v.split()).strip(" ,-–—")
+        k=_norm(v)
+        if v and k not in seen:
+            seen.add(k); out.append(v)
+    return out[:5]
+
+
+def _geocode_once(query: str, country_hint: str, limit: int) -> list[dict]:
     q = ", ".join(x for x in (query.strip(), country_hint.strip()) if x)
     payload = _get_json(NOMINATIM, params={
         "q": q, "format": "jsonv2", "addressdetails": 1,
@@ -139,9 +169,41 @@ def geocode_course(query: str, country_hint: str = "", limit: int = 5) -> list[d
             "latitude": lat, "longitude": lon,
             "match_score": round(score, 3), "display_name": display,
             "source": "OpenStreetMap / Nominatim", "raw": row,
+            "matched_query": query,
         })
     out.sort(key=lambda x: x["match_score"], reverse=True)
     return out
+
+
+def geocode_course(query: str, country_hint: str = "", limit: int = 5) -> list[dict]:
+    """User-triggered global fallback with automatic alias expansion.
+
+    Nominatim's public service requires <=1 request/second. We therefore try
+    conservative name variants sequentially, waiting between attempts, and stop
+    as soon as a usable result is returned. Streamlit caches the completed lookup.
+    """
+    if not query.strip():
+        raise IngestionError("Enter a course name before searching.")
+    variants = _alias_queries(query)
+    attempted=[]
+    for i, variant in enumerate(variants):
+        if i:
+            time.sleep(1.05)
+        attempted.append(variant)
+        rows = _geocode_once(variant, country_hint, limit)
+        if rows:
+            # Re-rank against the ORIGINAL user-entered venue as well as alias.
+            original=_norm(query); country=_norm(country_hint)
+            for row in rows:
+                hay=_norm(" ".join(str(row.get(k,"")) for k in ("name","display_name","city","state","country")))
+                original_score=SequenceMatcher(None, original, _norm(row.get("name"))).ratio()
+                if original and original in hay: original_score += 0.35
+                if country and country in hay: original_score += 0.30
+                row["match_score"] = round(max(float(row.get("match_score",0)), original_score),3)
+                row["lookup_attempts"] = attempted.copy()
+            rows.sort(key=lambda x:x["match_score"], reverse=True)
+            return rows[:limit]
+    return []
 
 def location_detail(match: dict) -> dict:
     """Normalize a geocoder match to the detail shape expected by weather."""
