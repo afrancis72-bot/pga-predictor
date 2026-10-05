@@ -3,140 +3,150 @@ import pandas as pd
 import streamlit as st
 
 from portfolio_optimizer import PortfolioSettings, optimize_portfolio
-from course_fit_ceiling import COURSE_PROFILES, add_course_fit_ceiling
-from course_fit_simulation import resimulate_with_course_fit_calibrated
+from pga_predictor_pro import Config, predict_from_dataframes
 
 ROOT = Path(__file__).resolve().parent
 
 st.set_page_config(page_title="PGA Predictor Pro", page_icon="⛳", layout="wide")
-st.title("⛳ PGA Predictor Pro — Tournament Model V10.4")
-st.caption("Tournament-agnostic V10.3 predictive logic + weekly data contract")
+st.title("⛳ PGA Predictor Pro — Tournament Model V10.5")
+st.caption("Tournament-agnostic weekly ingestion + frozen V10.3 predictive/optimizer logic")
+
+@st.cache_data
+def load_repo_csv(name):
+    path = ROOT / name
+    return pd.read_csv(path) if path.exists() else pd.DataFrame()
+
+def load_weekly(upload, name):
+    return pd.read_csv(upload) if upload is not None else load_repo_csv(name)
 
 st.sidebar.header("Tournament Setup")
 tournament_name = st.sidebar.text_input("Tournament", placeholder="Current tournament")
 course_name = st.sidebar.text_input("Course", placeholder="Current course")
-mc_upload = st.sidebar.file_uploader("Upload current-week simulation CSV", type="csv", key="mc")
-model_upload = st.sidebar.file_uploader("Upload current-week model-input CSV", type="csv", key="model")
+st.sidebar.subheader("Current-week data")
+st.sidebar.caption("Upload fresh weekly files. If omitted, the generic repository file is used and clearly flagged below.")
+players_up = st.sidebar.file_uploader("DK field / players.csv (required)", type="csv", key="players")
+stats_up = st.sidebar.file_uploader("player_stats.csv", type="csv", key="stats")
+results_up = st.sidebar.file_uploader("results.csv", type="csv", key="results")
+history_up = st.sidebar.file_uploader("course_history.csv", type="csv", key="history")
+holes_up = st.sidebar.file_uploader("course_holes.csv", type="csv", key="holes")
+weather_up = st.sidebar.file_uploader("weather.csv", type="csv", key="weather")
 
 if not tournament_name.strip() or not course_name.strip():
     st.info("Enter the current tournament and course in the sidebar.")
     st.stop()
 
-if mc_upload is None or model_upload is None:
-    st.warning("V10.4 has no tournament-specific fallback data. Upload BOTH current-week files before running the model: simulation CSV and model-input CSV.")
+players = load_weekly(players_up, "players.csv")
+player_stats = load_weekly(stats_up, "player_stats.csv")
+results = load_weekly(results_up, "results.csv")
+history = load_weekly(history_up, "course_history.csv")
+holes = load_weekly(holes_up, "course_holes.csv")
+weather = load_weekly(weather_up, "weather.csv")
+
+if players.empty:
+    st.error("A current-week players/DraftKings field file is required.")
+    st.stop()
+if "player" not in players.columns:
+    st.error("players.csv must contain a 'player' column.")
+    st.stop()
+if "salary" not in players.columns:
+    st.error("players.csv must contain a DraftKings 'salary' column for lineup optimization.")
     st.stop()
 
-mc = pd.read_csv(mc_upload)
-model = pd.read_csv(model_upload)
+sources = {
+    "players.csv": players_up,
+    "player_stats.csv": stats_up,
+    "results.csv": results_up,
+    "course_history.csv": history_up,
+    "course_holes.csv": holes_up,
+    "weather.csv": weather_up,
+}
+st.sidebar.subheader("Weekly data integrity")
+for name, up in sources.items():
+    if up is not None:
+        st.sidebar.success(f"{name}: uploaded")
+    elif (ROOT / name).exists():
+        st.sidebar.warning(f"{name}: repository fallback")
+    else:
+        st.sidebar.info(f"{name}: not supplied")
 
-required_mc = {"player", "salary", "win_pct", "top10_pct", "make_cut_pct", "dk_points_proxy"}
-missing_mc = sorted(required_mc - set(mc.columns))
-if missing_mc:
-    st.error("Simulation CSV is missing required columns: " + ", ".join(missing_mc))
-    st.stop()
+# Tournament-key checks where the data contract supports them.
+def tournament_coverage(df):
+    if df.empty or "tournament" not in df.columns:
+        return None
+    vals = df["tournament"].dropna().astype(str).str.strip().str.casefold()
+    return bool((vals == tournament_name.strip().casefold()).any())
 
-if "player" not in model.columns:
-    st.error("Model-input CSV must contain a 'player' column.")
-    st.stop()
+for label, df in [("course_history.csv", history), ("course_holes.csv", holes), ("weather.csv", weather)]:
+    match = tournament_coverage(df)
+    if match is False:
+        st.error(f"{label} contains a tournament column but has no rows for '{tournament_name}'. Load the current week's data before running.")
+        st.stop()
 
-# Weekly-data integrity gate: prevent labels from silently describing a different field.
-mc_players = set(mc["player"].dropna().astype(str).str.strip())
-model_players = set(model["player"].dropna().astype(str).str.strip())
-overlap = mc_players & model_players
-coverage = len(overlap) / max(len(mc_players), 1)
-if coverage < 0.90:
-    st.error(f"Weekly input mismatch: only {coverage:.0%} of simulation players are present in the model-input file. Load matching files for {tournament_name}.")
-    st.stop()
-elif coverage < 1.0:
-    st.sidebar.warning(f"Field match: {coverage:.0%}. Review missing model-input players before lineup lock.")
-else:
-    st.sidebar.success("Weekly field integrity check: 100% match")
-
-# Merge the best available confidence field into the simulation table.
-if "model_data_confidence" not in mc.columns:
-    for conf_col in ["model_data_confidence_v10", "model_data_confidence_v9", "model_data_confidence_v8", "model_data_confidence"]:
-        if conf_col in model.columns:
-            mc = mc.merge(model[["player", conf_col]].rename(columns={conf_col: "model_data_confidence"}), on="player", how="left")
-            break
-
-st.sidebar.subheader("Course-Fit Monte Carlo (V10.2c)")
-use_course_fit = st.sidebar.toggle(
-    "Enable calibrated Course-Fit simulation",
-    value=False,
-    help="Reprices the loaded weekly simulation using bounded course fit, then calibrates outputs back to the loaded baseline scale."
-)
-profile = st.sidebar.selectbox("Course profile", list(COURSE_PROFILES), index=0, disabled=not use_course_fit)
-
-if use_course_fit:
-    scored_model = add_course_fit_ceiling(model, profile)
-    mc = resimulate_with_course_fit_calibrated(mc, scored_model, sims=50000, seed=42)
-    st.sidebar.caption("Course fit is applied upstream in 50,000 Monte Carlo simulations. Outputs are calibrated to the loaded weekly baseline; the optimizer receives no separate course-fit bonus.")
+if players_up is None:
+    st.warning("The DK field is currently coming from repository players.csv. For a real weekly run, upload the current DraftKings field so stale players/salaries cannot be used silently.")
 
 st.sidebar.success(f"{tournament_name} — {course_name}")
-st.sidebar.caption("Data: current-week uploaded files")
-page = st.sidebar.radio("View", ["Model Dashboard", "Portfolio Optimizer"])
+sims = st.sidebar.selectbox("Monte Carlo simulations", [25000, 50000, 100000], index=1)
 
+if "prediction" not in st.session_state:
+    st.session_state.prediction = None
+    st.session_state.prediction_key = None
+
+run_key = (tournament_name, course_name, sims, getattr(players_up, "name", None), getattr(stats_up, "name", None), getattr(results_up, "name", None), getattr(history_up, "name", None), getattr(holes_up, "name", None), getattr(weather_up, "name", None))
+
+if st.button("Build current-week projections", type="primary"):
+    try:
+        with st.spinner(f"Running {sims:,} tournament simulations..."):
+            pred = predict_from_dataframes(
+                Config(tournament=tournament_name, sims=int(sims), seed=42),
+                players, player_stats, results, history, holes, weather
+            )
+            pred = pred.rename(columns={"dk_proxy": "dk_points_proxy"})
+            st.session_state.prediction = pred
+            st.session_state.prediction_key = run_key
+        st.success(f"Built projections for {len(pred)} golfers using {sims:,} simulations.")
+    except Exception as exc:
+        st.error(str(exc))
+
+mc = st.session_state.prediction
+if mc is None:
+    st.info("Load/verify the current-week data, then click **Build current-week projections**. V10.5 generates the simulation internally; no prebuilt Monte Carlo or model-input CSV is required.")
+    st.stop()
+if st.session_state.prediction_key != run_key:
+    st.warning("Tournament settings or weekly files changed. Rebuild projections before optimizing.")
+    st.stop()
+
+page = st.sidebar.radio("View", ["Model Dashboard", "Portfolio Optimizer"])
 if page == "Model Dashboard":
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Field", len(mc))
-    c2.metric("Simulations", "50,000" if use_course_fit else "Loaded baseline")
-    c3.metric("Salary floor", "$6,500")
-    c4.metric("DK salary cap", "$50,000")
-
+    c1.metric("Field", len(mc)); c2.metric("Simulations", f"{sims:,}"); c3.metric("Salary floor", "$6,500"); c4.metric("DK salary cap", "$50,000")
     st.subheader(f"{tournament_name} Simulation — {course_name}")
-    display_cols = [c for c in [
-        "player", "salary", "win_pct", "top5_pct", "top10_pct", "top20_pct",
-        "make_cut_pct", "expected_finish", "dk_points_proxy", "dk_value_per_1000",
-        "model_data_confidence", "course_fit_ceiling", "course_fit_coverage", "course_fit_profile"
-    ] if c in mc.columns]
-    sort_options = [c for c in ["win_pct", "top10_pct", "make_cut_pct", "dk_points_proxy", "course_fit_ceiling", "salary"] if c in mc.columns]
+    display_cols = [c for c in ["player","salary","win_pct","top5_pct","top10_pct","top20_pct","make_cut_pct","expected_finish","dk_points_proxy","points_per_1k","course_fit_ceiling"] if c in mc.columns]
+    sort_options = [c for c in ["win_pct","top10_pct","make_cut_pct","dk_points_proxy","course_fit_ceiling","salary"] if c in mc.columns]
     sort_col = st.selectbox("Sort by", sort_options)
-    ascending = sort_col == "salary"
-    st.dataframe(mc.sort_values(sort_col, ascending=ascending)[display_cols], width="stretch", hide_index=True)
+    st.dataframe(mc.sort_values(sort_col, ascending=(sort_col=="salary"))[display_cols], width="stretch", hide_index=True)
+    st.download_button("Download current-week projections", mc.to_csv(index=False), f"{tournament_name.replace(' ','_')}_projections.csv", "text/csv")
 else:
     st.subheader("DraftKings Portfolio Optimizer")
-    st.caption("Portfolio-wide exposure and uniqueness constraints are enforced across all six-golfer lineups.")
-
-    a, b, c, d = st.columns(4)
-    lineup_count = a.number_input("Lineups", 1, 20, 10)
-    max_exposure = b.slider("Max exposure", 0.10, 1.00, 0.50, 0.05)
-    min_unique = c.number_input("Minimum unique golfers", 1, 5, 3)
-    salary_floor = d.number_input("Minimum lineup salary", 40000, 50000, 46500, 100)
-
-    min_player_salary = st.number_input("Minimum golfer salary", 6000, 10000, 6500, 100, help="Hard rule: golfers below this salary are excluded from every lineup.")
-    strategy = st.selectbox("Strategy", ["GPP Ceiling", "Balanced / Single Entry", "Cut Equity"])
-    names = sorted(mc.player.dropna().astype(str).unique())
-    locks = st.multiselect("Lock golfers", names)
-    excludes = st.multiselect("Exclude golfers", [n for n in names if n not in locks])
-
-    st.info("V10.3 predictive/optimizer defaults preserved: 50% max exposure for 20-max PGA portfolios, 3 minimum unique golfers, $6,500 player floor, and $46,500 lineup floor.")
-
+    a,b,c,d=st.columns(4)
+    lineup_count=a.number_input("Lineups",1,20,10); max_exposure=b.slider("Max exposure",0.10,1.00,0.50,0.05); min_unique=c.number_input("Minimum unique golfers",1,5,3); salary_floor=d.number_input("Minimum lineup salary",40000,50000,46500,100)
+    min_player_salary=st.number_input("Minimum golfer salary",6000,10000,6500,100)
+    strategy=st.selectbox("Strategy",["GPP Ceiling","Balanced / Single Entry","Cut Equity"])
+    names=sorted(mc.player.dropna().astype(str).unique()); locks=st.multiselect("Lock golfers",names); excludes=st.multiselect("Exclude golfers",[n for n in names if n not in locks])
+    st.info("Frozen V10.3 optimizer defaults preserved: 50% max exposure for 20-max, 3 minimum unique, $6,500 golfer floor, $46,500 lineup floor.")
     if st.button("Generate portfolio", type="primary"):
-        settings = PortfolioSettings(
-            lineup_count=int(lineup_count), salary_cap=50000,
-            salary_floor=int(salary_floor), min_player_salary=int(min_player_salary), roster_size=6,
-            max_exposure=float(max_exposure), min_unique=int(min_unique),
-            strategy=strategy, seed=42,
-        )
+        settings=PortfolioSettings(lineup_count=int(lineup_count),salary_cap=50000,salary_floor=int(salary_floor),min_player_salary=int(min_player_salary),roster_size=6,max_exposure=float(max_exposure),min_unique=int(min_unique),strategy=strategy,seed=42)
         try:
             with st.spinner("Optimizing portfolio..."):
-                portfolio, summary, exposure = optimize_portfolio(mc, settings, locks, excludes)
+                portfolio,summary,exposure=optimize_portfolio(mc,settings,locks,excludes)
             st.success(f"Generated {len(summary)} lineups")
-            st.subheader("Lineup Summary")
-            st.dataframe(summary, width="stretch", hide_index=True)
-            st.subheader("Lineups")
-            for number in summary.lineup:
-                lu = portfolio[portfolio.lineup == number]
-                salary = int(lu.salary.sum())
-                with st.expander(f"Lineup {number} — ${salary:,}", expanded=(number == 1)):
-                    cols = [c for c in ["player", "salary", "win_pct", "top10_pct", "make_cut_pct", "dk_points_proxy", "course_fit_ceiling"] if c in lu.columns]
-                    st.dataframe(lu[cols], width="stretch", hide_index=True)
-            st.subheader("Exposure")
-            st.dataframe(exposure, width="stretch", hide_index=True)
-            st.download_button("Download lineups CSV", portfolio.to_csv(index=False), "pga_lineups.csv", "text/csv")
-            st.download_button("Download exposure CSV", exposure.to_csv(index=False), "pga_exposure.csv", "text/csv")
+            st.subheader("Lineup Summary"); st.dataframe(summary,width="stretch",hide_index=True)
+            st.subheader("Lineups"); st.dataframe(portfolio,width="stretch",hide_index=True)
+            st.subheader("Exposure"); st.dataframe(exposure,width="stretch",hide_index=True)
+            st.download_button("Download lineups CSV",portfolio.to_csv(index=False),"pga_lineups.csv","text/csv")
+            st.download_button("Download exposure CSV",exposure.to_csv(index=False),"pga_exposure.csv","text/csv")
         except Exception as exc:
             st.error(str(exc))
 
 st.divider()
-st.caption("V10.4 architecture release: no tournament-specific fallback data. Refresh field, course inputs, weather, tee times and withdrawals before lineup lock.")
+st.caption("V10.5 ingestion release: current-week inputs → frozen tournament model → Monte Carlo → optimizer. Refresh field, course data, weather, tee times and withdrawals before lineup lock.")

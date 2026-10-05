@@ -138,12 +138,13 @@ class Config:
 # ---------------------------------------------------------------------
 
 def read_csv(filename: str) -> pd.DataFrame:
-    path = DATA / filename
-
-    if not path.exists():
-        return pd.DataFrame()
-
-    return pd.read_csv(path)
+    # V10.5 accepts a clean single-level repository as well as the legacy
+    # data/ layout. Prefer data/ when present, then fall back to repo root.
+    candidates = [DATA / filename, ROOT / filename]
+    for path in candidates:
+        if path.exists():
+            return pd.read_csv(path)
+    return pd.DataFrame()
 
 
 def zscore(series: pd.Series) -> pd.Series:
@@ -1629,6 +1630,61 @@ def simulate(
 # ---------------------------------------------------------------------
 # PREDICT TOURNAMENT
 # ---------------------------------------------------------------------
+
+# ---------------------------------------------------------------------
+# PREDICT FROM CURRENT-WEEK DATAFRAMES (V10.5)
+# ---------------------------------------------------------------------
+
+def predict_from_dataframes(
+    config: Config,
+    players: pd.DataFrame,
+    player_stats: pd.DataFrame | None = None,
+    results: pd.DataFrame | None = None,
+    history: pd.DataFrame | None = None,
+    holes: pd.DataFrame | None = None,
+    weather: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Run the existing tournament model directly from weekly inputs.
+
+    This is an ingestion wrapper only; it does not change model weights,
+    simulation math, or optimizer behavior.
+    """
+    if players is None or players.empty:
+        raise RuntimeError("Current-week players/DK field is missing or empty.")
+
+    p = players.copy()
+    for frame in [player_stats]:
+        if frame is not None and not frame.empty:
+            if "player" not in frame.columns:
+                raise RuntimeError("player_stats.csv must contain a 'player' column.")
+            # Avoid duplicate salary/identity columns from weekly joins.
+            add_cols = [c for c in frame.columns if c == "player" or c not in p.columns]
+            p = p.merge(frame[add_cols], on="player", how="left")
+
+    results = pd.DataFrame() if results is None else results.copy()
+    history = pd.DataFrame() if history is None else history.copy()
+    holes = pd.DataFrame() if holes is None else holes.copy()
+    weather = pd.DataFrame() if weather is None else weather.copy()
+
+    features, dna, weights = build_features(
+        p, results, history, holes, weather, config.tournament
+    )
+    simulation = simulate(features, sims=config.sims, seed=config.seed)
+    final = features.merge(simulation, on="player", how="left")
+
+    if "salary" in final.columns:
+        final["salary"] = pd.to_numeric(final["salary"], errors="coerce")
+        final["points_per_1k"] = final["dk_proxy"] / (final["salary"] / 1000)
+    if "ownership" in final.columns:
+        final["ownership"] = pd.to_numeric(final["ownership"], errors="coerce")
+        final["leverage"] = final["dk_proxy"] / np.maximum(final["ownership"], 0.25)
+    else:
+        final["ownership"] = np.nan
+        final["leverage"] = np.nan
+
+    final["model_rank"] = final["expected_finish"].rank(method="min")
+    final = final.sort_values(["win_pct", "top10_pct", "expected_finish"], ascending=[False, False, True])
+    return final
 
 def predict(
     config: Config
