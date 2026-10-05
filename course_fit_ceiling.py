@@ -13,7 +13,7 @@ COURSE_PROFILES = {
     },
     "Approach / Scoring": {
         "sg_approach": .25, "recent5_sg_approach": .25, "recent_ball_striking": .20,
-        "black_desert_driving_v10": .12, "course_history_z_v8": .08, "sg_putting": .10,
+        "driving_fit": .12, "course_history_z_v8": .08, "sg_putting": .10,
     },
     "Accuracy / Positioning": {
         "sg_approach": .20, "recent5_sg_approach": .15, "driving_accuracy": .22,
@@ -32,7 +32,7 @@ ALIASES = {
     "model_data_confidence_v9": ["model_data_confidence_v10", "model_data_confidence_v9", "model_data_confidence_v8", "model_data_confidence"],
     "recent5_sg_approach": ["recent5_sg_approach", "form_sg_approach"],
     "recent_ball_striking": ["recent_ball_striking"],
-    "black_desert_driving_v10": ["black_desert_driving_v10", "driving_fit"],
+    "driving_fit": ["driving_fit"],
 }
 
 def _z(s: pd.Series) -> pd.Series:
