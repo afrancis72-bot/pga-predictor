@@ -3,14 +3,14 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from data_ingestion import search_courses, fetch_course_detail, fetch_course_holes, fetch_weather, IngestionError
+from data_ingestion import search_courses, geocode_course, location_detail, fetch_course_detail, fetch_course_holes, fetch_weather, IngestionError
 from portfolio_optimizer import PortfolioSettings, optimize_portfolio
 from pga_predictor_pro import Config, predict_from_dataframes
 
 ROOT = Path(__file__).resolve().parent
 st.set_page_config(page_title="PGA Predictor Pro", page_icon="⛳", layout="wide")
-st.title("⛳ PGA Predictor Pro — Tournament Model V10.6.2")
-st.caption("$0 international course/weather ingestion + manual DraftKings field + frozen tournament model/optimizer")
+st.title("⛳ PGA Predictor Pro — Tournament Model V10.6.3")
+st.caption("$0 multi-source international course/weather ingestion + manual DraftKings field + frozen tournament model/optimizer")
 
 @st.cache_data
 def load_repo_csv(name):
@@ -24,6 +24,10 @@ def load_weekly(upload, name):
 def cached_course_search(query, api_key, country_hint):
     return search_courses(query, api_key, country_hint)
 
+@st.cache_data(ttl=86400)
+def cached_osm_search(query, country_hint):
+    return geocode_course(query, country_hint)
+
 @st.cache_data(ttl=3600)
 def cached_course_detail(course_id, api_key):
     return fetch_course_detail(course_id, api_key)
@@ -33,9 +37,13 @@ def cached_course_holes(course_id, tournament, api_key):
     return fetch_course_holes(course_id, tournament, api_key)
 
 @st.cache_data(ttl=1800)
-def cached_weather(course_id, tournament, start_date, api_key):
+def cached_weather_gca(course_id, tournament, start_date, api_key):
     detail = cached_course_detail(course_id, api_key)
     return fetch_weather(detail, tournament, start_date=start_date, days=7)
+
+@st.cache_data(ttl=1800)
+def cached_weather_location(lat, lon, tournament, start_date):
+    return fetch_weather({"latitude": lat, "longitude": lon}, tournament, start_date=start_date, days=7)
 
 st.sidebar.header("Tournament Setup")
 tournament_name = st.sidebar.text_input("Tournament", placeholder="Current tournament")
@@ -46,28 +54,44 @@ st.sidebar.subheader("DraftKings")
 players_up = st.sidebar.file_uploader("DraftKings field / players.csv (required)", type="csv", key="players")
 
 st.sidebar.subheader("$0 internet ingestion")
-st.sidebar.caption("Course/holes: Golf Courses API (international). Weather: Open-Meteo. No PGA TOUR scraping is used.")
-gca_key = st.sidebar.text_input("Golf Courses API key", type="password", help="Free key: 30 requests/day; no credit card.")
+st.sidebar.caption("Course/scorecard: Golf Courses API when available. Global location fallback: OpenStreetMap/Nominatim. Weather: Open-Meteo. No PGA TOUR scraping is used.")
+gca_key = st.sidebar.text_input("Golf Courses API key (optional)", type="password", help="Optional richer scorecard source. If blank or no match is found, the app uses the global OpenStreetMap location fallback.")
 country_hint = st.sidebar.text_input("Country / region hint (recommended)", placeholder="Japan, Bermuda, Mexico...")
 if "course_matches" not in st.session_state: st.session_state.course_matches = []
 if "selected_course_id" not in st.session_state: st.session_state.selected_course_id = None
+if "course_lookup_note" not in st.session_state: st.session_state.course_lookup_note = ""
 if st.sidebar.button("Find course online"):
     st.session_state.selected_course_id = None
     st.session_state.course_matches = []
+    st.session_state.course_lookup_note = ""
     try:
-        st.session_state.course_matches = cached_course_search(course_query, gca_key, country_hint)
-        if not st.session_state.course_matches:
-            st.sidebar.warning("No course matches returned. Try a shorter course name or add/change the country hint.")
+        gca_matches = cached_course_search(course_query, gca_key, country_hint) if gca_key.strip() else []
+        for r in gca_matches: r["source"] = "Golf Courses API"
+        if gca_matches:
+            st.session_state.course_matches = gca_matches
+            st.session_state.course_lookup_note = "Rich course database match found."
+        else:
+            osm_matches = cached_osm_search(course_query, country_hint)
+            st.session_state.course_matches = osm_matches
+            st.session_state.course_lookup_note = (
+                "Golf Courses API had no match; global OpenStreetMap location fallback used." if gca_key.strip()
+                else "Global OpenStreetMap location lookup used."
+            )
+            if not osm_matches:
+                st.session_state.course_lookup_note = "No match from either available course/location source."
     except Exception as exc:
-        st.sidebar.error(str(exc))
+        st.session_state.course_lookup_note = f"Lookup failed: {exc}"
+
+if st.session_state.course_lookup_note:
+    (st.sidebar.warning if "no match" in st.session_state.course_lookup_note.casefold() or "failed" in st.session_state.course_lookup_note.casefold() else st.sidebar.info)(st.session_state.course_lookup_note)
 
 selected_course = None
 if st.session_state.course_matches:
-    labels = [f"{r['name']} — {r['city']}, {r['state']}, {r['country']}".strip(" —,") for r in st.session_state.course_matches]
-    choice = st.sidebar.selectbox("Matched course", range(len(labels)), format_func=lambda i: labels[i])
+    labels = [f"[{r.get('source','Course source')}] {r['name']} — {r['city']}, {r['state']}, {r['country']}".strip(" —,") for r in st.session_state.course_matches]
+    choice = st.sidebar.selectbox("Matched course/location", range(len(labels)), format_func=lambda i: labels[i])
     selected_course = st.session_state.course_matches[choice]
     st.session_state.selected_course_id = selected_course["id"]
-    st.sidebar.success("Course source ready")
+    st.sidebar.success(f"Course identity ready via {selected_course.get('source','online source')}")
 
 st.sidebar.subheader("Advanced model inputs")
 st.sidebar.caption("Optional weekly uploads. Repository fallbacks remain available until a lawful free current-stat API is identified.")
@@ -89,21 +113,27 @@ history = load_weekly(history_up, "course_history.csv")
 # Course holes: explicit upload > selected open source > repository fallback.
 if holes_up is not None:
     holes = pd.read_csv(holes_up); holes_source = "uploaded"
-elif st.session_state.selected_course_id:
-    try:
-        holes, selected_detail = cached_course_holes(st.session_state.selected_course_id, tournament_name, gca_key)
-        holes_source = "Golf Courses API" if not holes.empty else "course found; scorecard/holes unavailable"
-    except Exception as exc:
-        holes = pd.DataFrame(); holes_source = f"failed: {exc}"
+elif selected_course is not None:
+    if selected_course.get("source") == "Golf Courses API":
+        try:
+            holes, selected_detail = cached_course_holes(st.session_state.selected_course_id, tournament_name, gca_key)
+            holes_source = "Golf Courses API" if not holes.empty else "course identified; scorecard/holes unavailable"
+        except Exception as exc:
+            holes = pd.DataFrame(); holes_source = f"course identified; scorecard failed: {exc}"
+    else:
+        holes = pd.DataFrame(); holes_source = "location verified; scorecard/holes unavailable"
 else:
     holes = load_repo_csv("course_holes.csv"); holes_source = "repository fallback" if not holes.empty else "not supplied"
 
 # Weather: explicit upload > selected open source > repository fallback.
 if weather_up is not None:
     weather = pd.read_csv(weather_up); weather_source = "uploaded"
-elif st.session_state.selected_course_id:
+elif selected_course is not None:
     try:
-        weather = cached_weather(st.session_state.selected_course_id, tournament_name, tournament_start, gca_key)
+        if selected_course.get("source") == "Golf Courses API":
+            weather = cached_weather_gca(st.session_state.selected_course_id, tournament_name, tournament_start, gca_key)
+        else:
+            weather = cached_weather_location(float(selected_course["latitude"]), float(selected_course["longitude"]), tournament_name, tournament_start)
         weather_source = "Open-Meteo"
     except Exception as exc:
         weather = pd.DataFrame(); weather_source = f"failed: {exc}"
@@ -143,10 +173,10 @@ st.sidebar.success(f"{tournament_name} — {course_query}")
 sims=st.sidebar.selectbox("Monte Carlo simulations",[25000,50000,100000],index=1)
 
 # Make the limitations visible rather than silently implying full automation.
-with st.expander("V10.6.2 source coverage", expanded=True):
+with st.expander("V10.6.3 source coverage", expanded=True):
     c1,c2,c3,c4=st.columns(4)
     c1.metric("DK field", "Uploaded ✓" if dk_ready else "Awaiting upload")
-    c2.metric("Course/holes", "Auto ✓" if holes_source=="Golf Courses API" else holes_source)
+    c2.metric("Course/holes", "Scorecard auto ✓" if holes_source=="Golf Courses API" else holes_source)
     c3.metric("Weather", "Auto ✓" if weather_source=="Open-Meteo" else weather_source)
     advanced_fresh=sum(x is not None for x in (stats_up,results_up,history_up))
     c4.metric("Advanced stats/form/history", f"{advanced_fresh}/3 fresh uploads")
@@ -154,7 +184,7 @@ with st.expander("V10.6.2 source coverage", expanded=True):
         st.warning("Advanced player stats/results/course history are not fully automated at $0 yet. Repository fallbacks can be used for testing, but should not be treated as current-week data unless you have verified them.")
 
 if "prediction" not in st.session_state: st.session_state.prediction=None; st.session_state.prediction_key=None
-run_key=(tournament_name,course_query,str(tournament_start),sims,getattr(players_up,"name",None),getattr(stats_up,"name",None),getattr(results_up,"name",None),getattr(history_up,"name",None),holes_source,weather_source,st.session_state.selected_course_id)
+run_key=(tournament_name,course_query,str(tournament_start),sims,getattr(players_up,"name",None),getattr(stats_up,"name",None),getattr(results_up,"name",None),getattr(history_up,"name",None),holes_source,weather_source,st.session_state.selected_course_id, selected_course.get("source") if selected_course else None)
 if st.button("Build current-week projections", type="primary"):
     if players_up is None:
         st.error("Upload the current DraftKings field before building projections.")
@@ -205,4 +235,4 @@ else:
         except Exception as exc: st.error(str(exc))
 
 st.divider()
-st.caption("V10.6.2 ingestion release. International course data: Golf Courses API. Weather: Open-Meteo. Predictive model/optimizer unchanged.")
+st.caption("V10.6.3 ingestion release. Course data: Golf Courses API when available; global location fallback: OpenStreetMap/Nominatim; weather: Open-Meteo. Predictive model/optimizer unchanged. OpenStreetMap data © OpenStreetMap contributors, ODbL.")

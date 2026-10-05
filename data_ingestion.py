@@ -1,4 +1,4 @@
-"""V10.6.2 international course/weather ingestion adapters.
+"""V10.6.3 multi-source international course/weather ingestion adapters.
 
 This module fetches and normalizes external inputs only. Predictive logic is unchanged.
 Golf Courses API: international course search/detail/scorecards (free API key required).
@@ -15,7 +15,8 @@ import pandas as pd
 
 GCA = "https://www.golfcoursesapi.com/api/v1"
 OPEN_METEO = "https://api.open-meteo.com/v1/forecast"
-UA = "PGA-Predictor-V10.6.2/1.0"
+UA = "PGA-Predictor-V10.6.3/1.0 (personal golf research app)"
+NOMINATIM = "https://nominatim.openstreetmap.org/search"
 
 class IngestionError(RuntimeError):
     pass
@@ -96,6 +97,61 @@ def search_courses(query: str, api_key: str, country_hint: str = "", limit: int 
         })
     out.sort(key=lambda x: x["match_score"], reverse=True)
     return out[:limit]
+
+
+def geocode_course(query: str, country_hint: str = "", limit: int = 5) -> list[dict]:
+    """One-off, user-triggered OSM Nominatim fallback. Cached by Streamlit caller.
+
+    This intentionally makes ONE search request per user action and does not
+    autocomplete, bulk-query, or scrape Nominatim details.
+    """
+    if not query.strip():
+        raise IngestionError("Enter a course name before searching.")
+    q = ", ".join(x for x in (query.strip(), country_hint.strip()) if x)
+    payload = _get_json(NOMINATIM, params={
+        "q": q, "format": "jsonv2", "addressdetails": 1,
+        "limit": max(1, min(int(limit), 10)),
+    })
+    if not isinstance(payload, list):
+        return []
+    qn, cn = _norm(query), _norm(country_hint)
+    out=[]
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        display = str(row.get("display_name") or "")
+        addr = row.get("address") if isinstance(row.get("address"), dict) else {}
+        name = str(row.get("name") or addr.get("golf_course") or display.split(",")[0] or query)
+        hay = _norm(display)
+        score = SequenceMatcher(None, qn, _norm(name)).ratio()
+        if qn and qn in hay: score += 0.35
+        if cn and cn in hay: score += 0.30
+        try:
+            lat, lon = float(row.get("lat")), float(row.get("lon"))
+        except (TypeError, ValueError):
+            continue
+        out.append({
+            "id": f"osm:{row.get('osm_type','')}:{row.get('osm_id','')}",
+            "name": name, "club": name,
+            "city": str(addr.get("city") or addr.get("town") or addr.get("village") or addr.get("municipality") or ""),
+            "state": str(addr.get("state") or addr.get("region") or ""),
+            "country": str(addr.get("country") or country_hint or ""),
+            "latitude": lat, "longitude": lon,
+            "match_score": round(score, 3), "display_name": display,
+            "source": "OpenStreetMap / Nominatim", "raw": row,
+        })
+    out.sort(key=lambda x: x["match_score"], reverse=True)
+    return out
+
+def location_detail(match: dict) -> dict:
+    """Normalize a geocoder match to the detail shape expected by weather."""
+    return {
+        "name": match.get("name"),
+        "latitude": match.get("latitude"),
+        "longitude": match.get("longitude"),
+        "city": match.get("city"), "state": match.get("state"),
+        "country": match.get("country"), "source": match.get("source"),
+    }
 
 def fetch_course_detail(course_id: str, api_key: str) -> dict:
     payload = _get_json(f"{GCA}/courses/{course_id}", api_key=api_key)
