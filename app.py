@@ -9,7 +9,7 @@ from pga_predictor_pro import Config, predict_from_dataframes
 
 ROOT = Path(__file__).resolve().parent
 st.set_page_config(page_title="PGA Predictor Pro", page_icon="⛳", layout="wide")
-st.title("⛳ PGA Predictor Pro — Tournament Model V10.6.4")
+st.title("⛳ PGA Predictor Pro — Tournament Model V10.6.4a")
 st.caption("$0 multi-source international course/weather ingestion + manual DraftKings field + frozen tournament model/optimizer")
 
 @st.cache_data
@@ -25,7 +25,8 @@ def cached_course_search(query, api_key, country_hint):
     return search_courses(query, api_key, country_hint)
 
 @st.cache_data(ttl=86400)
-def cached_osm_search(query, country_hint):
+def cached_osm_search(query, country_hint, resolver_version="10.6.4a"):
+    # resolver_version deliberately invalidates cached misses after resolver updates.
     return geocode_course(query, country_hint)
 
 @st.cache_data(ttl=3600)
@@ -173,7 +174,7 @@ st.sidebar.success(f"{tournament_name} — {course_query}")
 sims=st.sidebar.selectbox("Monte Carlo simulations",[25000,50000,100000],index=1)
 
 # Make the limitations visible rather than silently implying full automation.
-with st.expander("V10.6.4 source coverage", expanded=True):
+with st.expander("V10.6.4a source coverage", expanded=True):
     c1,c2,c3,c4=st.columns(4)
     c1.metric("DK field", "Uploaded ✓" if dk_ready else "Awaiting upload")
     c2.metric("Course/holes", "Scorecard auto ✓" if holes_source=="Golf Courses API" else holes_source)
@@ -235,4 +236,4 @@ else:
         except Exception as exc: st.error(str(exc))
 
 st.divider()
-st.caption("V10.6.4 ingestion release. Course data: Golf Courses API when available; global location fallback: OpenStreetMap/Nominatim; weather: Open-Meteo. Predictive model/optimizer unchanged. OpenStreetMap data © OpenStreetMap contributors, ODbL.")
+st.caption("V10.6.4a ingestion release. Course data: Golf Courses API when available; global location fallback: OpenStreetMap/Nominatim; weather: Open-Meteo. Predictive model/optimizer unchanged. OpenStreetMap data © OpenStreetMap contributors, ODbL.")

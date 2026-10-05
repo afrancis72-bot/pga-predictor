@@ -19,6 +19,26 @@ OPEN_METEO = "https://api.open-meteo.com/v1/forecast"
 UA = "PGA-Predictor-V10.6.4/1.0 (personal golf research app)"
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
 
+# Venue aliases are ingestion metadata only; they do not alter predictive weights.
+# They bridge official tournament branding to names commonly used by public map data.
+VENUE_ALIASES = {
+    "vidantaworld vallarta course": [
+        "Vidanta Vallarta Golf Course",
+        "Vidanta Golf Nuevo Vallarta",
+        "Vidanta Greg Norman Golf Course",
+        "Vidanta Golf Norman Course",
+    ],
+    "vidantaworld vallarta": [
+        "Vidanta Vallarta Golf Course",
+        "Vidanta Golf Nuevo Vallarta",
+        "Vidanta Greg Norman Golf Course",
+    ],
+    "vidanta vallarta": [
+        "Vidanta Greg Norman Golf Course",
+        "Vidanta Golf Nuevo Vallarta",
+    ],
+}
+
 class IngestionError(RuntimeError):
     pass
 
@@ -111,6 +131,10 @@ def _alias_queries(query: str) -> list[str]:
     if not raw:
         return []
     variants = [raw]
+    # Add verified venue aliases before generic simplification. This handles
+    # renamed tournament venues whose map record retains a legacy/design name.
+    key = _norm(raw)
+    variants.extend(VENUE_ALIASES.get(key, []))
     # Split CamelCase branding (VidantaWorld -> Vidanta World), then try both
     # with generic golf suffixes removed and common "World" rebrand token removed.
     split = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", raw)
