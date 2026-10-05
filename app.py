@@ -11,7 +11,7 @@ DATA = ROOT / "data"
 
 st.set_page_config(page_title="PGA Predictor Pro", page_icon="⛳", layout="wide")
 st.title("⛳ PGA Predictor Pro")
-st.caption("Tournament probabilities + DraftKings portfolio optimizer + round-specific Showdown")
+st.caption("Tournament probabilities + DraftKings portfolio optimizer")
 
 # Production fallback for the current tournament. Future weeks can be loaded
 # directly from the sidebar without changing app.py.
@@ -44,20 +44,6 @@ elif DEFAULT_MODEL.exists():
     model = read_path(str(DEFAULT_MODEL))
 else:
     model = pd.DataFrame()
-
-app_mode = st.sidebar.radio("Game Type", ["Tournament V10.3", "Showdown V1.0"])
-if app_mode == "Showdown V1.0":
-    # Lazy-load Showdown so Tournament V10.3 can always start independently.
-    try:
-        from showdown_ui import render_showdown
-        showdown_base = model.copy() if not model.empty else mc.copy()
-        if "salary" not in showdown_base.columns and "salary" in mc.columns:
-            showdown_base = showdown_base.merge(mc[["player", "salary"]], on="player", how="left")
-        render_showdown(showdown_base)
-    except Exception as exc:
-        st.error("Showdown module could not start. Tournament V10.3 remains available.")
-        st.exception(exc)
-    st.stop()
 
 required = {"player", "salary", "win_pct", "top10_pct", "make_cut_pct", "dk_points_proxy"}
 missing = sorted(required - set(mc.columns))
