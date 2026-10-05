@@ -3,13 +3,13 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from data_ingestion import search_courses, geocode_course, location_detail, fetch_course_detail, fetch_course_holes, fetch_weather, IngestionError
+from international_ingestion import search_courses, geocode_course, location_detail, fetch_course_detail, fetch_course_holes, fetch_weather, IngestionError
 from portfolio_optimizer import PortfolioSettings, optimize_portfolio
 from pga_predictor_pro import Config, predict_from_dataframes
 
 ROOT = Path(__file__).resolve().parent
 st.set_page_config(page_title="PGA Predictor Pro", page_icon="⛳", layout="wide")
-st.title("⛳ PGA Predictor Pro — Tournament Model V10.6.3")
+st.title("⛳ PGA Predictor Pro — Tournament Model V10.6.3a")
 st.caption("$0 multi-source international course/weather ingestion + manual DraftKings field + frozen tournament model/optimizer")
 
 @st.cache_data
@@ -173,7 +173,7 @@ st.sidebar.success(f"{tournament_name} — {course_query}")
 sims=st.sidebar.selectbox("Monte Carlo simulations",[25000,50000,100000],index=1)
 
 # Make the limitations visible rather than silently implying full automation.
-with st.expander("V10.6.3 source coverage", expanded=True):
+with st.expander("V10.6.3a source coverage", expanded=True):
     c1,c2,c3,c4=st.columns(4)
     c1.metric("DK field", "Uploaded ✓" if dk_ready else "Awaiting upload")
     c2.metric("Course/holes", "Scorecard auto ✓" if holes_source=="Golf Courses API" else holes_source)
@@ -235,4 +235,4 @@ else:
         except Exception as exc: st.error(str(exc))
 
 st.divider()
-st.caption("V10.6.3 ingestion release. Course data: Golf Courses API when available; global location fallback: OpenStreetMap/Nominatim; weather: Open-Meteo. Predictive model/optimizer unchanged. OpenStreetMap data © OpenStreetMap contributors, ODbL.")
+st.caption("V10.6.3a ingestion release. Course data: Golf Courses API when available; global location fallback: OpenStreetMap/Nominatim; weather: Open-Meteo. Predictive model/optimizer unchanged. OpenStreetMap data © OpenStreetMap contributors, ODbL.")
