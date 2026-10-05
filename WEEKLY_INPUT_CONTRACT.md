@@ -1,44 +1,27 @@
-# PGA Predictor V10.4 — Weekly Input Contract
+# PGA Predictor V10.6 — Weekly Input Contract
 
-V10.4 is tournament-agnostic. It contains no embedded tournament field, course, simulation, or model-input fallback.
+V10.6 keeps the DraftKings field manual and automates only sources with published API/open-data access suitable for automated use.
 
-## Required each week in the Streamlit app
+## Required for a production weekly run
 1. Tournament name
 2. Course name
-3. Current-week simulation CSV
-4. Matching current-week model-input CSV
+3. Current DraftKings field CSV with `player` and `salary`
+4. Select a matched course from OpenGolfAPI, or upload `course_holes.csv`
 
-### Simulation CSV — required columns
-- `player`
-- `salary`
-- `win_pct`
-- `top10_pct`
-- `make_cut_pct`
-- `dk_points_proxy`
+## Automated at $0
+- Course search and hole/scorecard data: OpenGolfAPI (ODbL)
+- Course weather forecast: Open-Meteo (CC BY 4.0)
 
-Optional outputs used when present include `top5_pct`, `top20_pct`, `expected_finish`, `expected_4r_to_par_if_made_cut`, and `dk_value_per_1000`.
+Automated hole data supplies par/yardage from the open source. Course-DNA fields not present in the source are left at the model's neutral defaults rather than invented.
 
-### Model-input CSV
-Must contain `player`. Course-Fit uses whichever supported columns are available. Missing statistics are not treated as zero; coverage is tracked.
+## Advanced inputs
+`player_stats.csv`, `results.csv`, and `course_history.csv` remain optional uploads/repository fallbacks. V10.6 does not scrape PGA TOUR. Repository fallback files are visibly flagged and must not be assumed current.
 
-Generic Course-Fit columns include:
-- `sg_approach`
-- `recent5_sg_approach` or `form_sg_approach`
-- `recent_ball_striking`
-- `sg_ott`
-- `driving_accuracy`
-- `driving_distance`
-- `driving_fit` (generic course-specific driving suitability input)
-- `sg_putting`
-- `sg_arg`
-- `course_history_z`, `course_history_score`, or legacy `course_history_z_v8`
-- `model_data_confidence` or versioned equivalents
-
-## Integrity gate
-The app compares the player field in both weekly files. Below 90% overlap stops the app; partial overlap above that threshold produces a warning.
+## Integrity rules
+- A current DraftKings upload is required before simulation.
+- Tournament-keyed files with no matching current tournament are blocked.
+- Internet-source failures are surfaced; no silent stale substitution is performed.
+- Explicit `course_holes.csv` / `weather.csv` uploads override automated sources.
 
 ## Predictive logic
-V10.4 is an architecture/data-contract release. The V10.3 optimizer defaults and calibrated Course-Fit Monte Carlo methodology are preserved. No Bank of Utah or Black Desert data is bundled or used as fallback.
-
-## Upstream generic engine
-`pga_predictor_pro.py` remains CSV-driven and supports the generic source files `players.csv`, `player_stats.csv`, `results.csv`, `course_history.csv`, `course_holes.csv`, and `weather.csv` when running the upstream prediction pipeline.
+V10.6 is an ingestion/UI release. It does not intentionally alter the predictive weights, Monte Carlo simulation, or optimizer logic in `pga_predictor_pro.py` / `portfolio_optimizer.py`.
