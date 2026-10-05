@@ -23,3 +23,17 @@ Open-Meteo is queried from the selected course coordinates for the selected tour
 - Manual `course_holes.csv` and `weather.csv` override internet sources.
 - Unknown course-DNA fields remain neutral rather than being fabricated.
 - Predictive model and portfolio optimizer are not intentionally changed by V10.6.2.
+
+
+## OTIS Golf import (V10.6.5)
+
+The app supports user-triggered OTIS Golf CSV exports; it does not scrape or automate requests to OTIS.
+
+1. In OTIS Custom Data, export **Season stats** for the current field/current season. Recommended columns:
+   `sg_total`, `sg_off_the_tee`, `sg_approach`, `sg_around_green`, `sg_putting`,
+   `sg_tee_to_green`, `measured_rounds`, `driving_distance`, `driving_accuracy_pct`,
+   `gir_pct`, `scrambling_pct`, `scoring_avg`, `birdie_avg`, `par3_scoring_avg`,
+   `par4_scoring_avg`, `par5_scoring_avg`, `events_played`, `cuts_made`, `top10s`, `wins`.
+2. Export **Event results** for the same players. The app uses this as recent-results input and derives current-course history when the export includes the current venue.
+3. Blank OTIS values remain missing; they are never converted to zero.
+4. Direct model-contract uploads override OTIS; OTIS overrides repository fallbacks.
