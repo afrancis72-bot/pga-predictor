@@ -9,8 +9,8 @@ from pga_predictor_pro import Config, predict_from_dataframes
 
 ROOT = Path(__file__).resolve().parent
 st.set_page_config(page_title="PGA Predictor Pro", page_icon="⛳", layout="wide")
-st.title("⛳ PGA Predictor Pro — Tournament Model V10.6")
-st.caption("$0 course/weather ingestion + manual DraftKings field + frozen tournament model/optimizer")
+st.title("⛳ PGA Predictor Pro — Tournament Model V10.6.2")
+st.caption("$0 international course/weather ingestion + manual DraftKings field + frozen tournament model/optimizer")
 
 @st.cache_data
 def load_repo_csv(name):
@@ -21,20 +21,20 @@ def load_weekly(upload, name):
     return pd.read_csv(upload) if upload is not None else load_repo_csv(name)
 
 @st.cache_data(ttl=3600)
-def cached_course_search(query):
-    return search_courses(query)
+def cached_course_search(query, api_key, country_hint):
+    return search_courses(query, api_key, country_hint)
 
 @st.cache_data(ttl=3600)
-def cached_course_detail(course_id):
-    return fetch_course_detail(course_id)
+def cached_course_detail(course_id, api_key):
+    return fetch_course_detail(course_id, api_key)
 
 @st.cache_data(ttl=3600)
-def cached_course_holes(course_id, tournament):
-    return fetch_course_holes(course_id, tournament)
+def cached_course_holes(course_id, tournament, api_key):
+    return fetch_course_holes(course_id, tournament, api_key)
 
 @st.cache_data(ttl=1800)
-def cached_weather(course_id, tournament, start_date):
-    detail = cached_course_detail(course_id)
+def cached_weather(course_id, tournament, start_date, api_key):
+    detail = cached_course_detail(course_id, api_key)
     return fetch_weather(detail, tournament, start_date=start_date, days=7)
 
 st.sidebar.header("Tournament Setup")
@@ -46,18 +46,24 @@ st.sidebar.subheader("DraftKings")
 players_up = st.sidebar.file_uploader("DraftKings field / players.csv (required)", type="csv", key="players")
 
 st.sidebar.subheader("$0 internet ingestion")
-st.sidebar.caption("Course/holes: OpenGolfAPI. Weather: Open-Meteo. No PGA TOUR scraping is used.")
+st.sidebar.caption("Course/holes: Golf Courses API (international). Weather: Open-Meteo. No PGA TOUR scraping is used.")
+gca_key = st.sidebar.text_input("Golf Courses API key", type="password", help="Free key: 30 requests/day; no credit card.")
+country_hint = st.sidebar.text_input("Country / region hint (recommended)", placeholder="Japan, Bermuda, Mexico...")
 if "course_matches" not in st.session_state: st.session_state.course_matches = []
 if "selected_course_id" not in st.session_state: st.session_state.selected_course_id = None
 if st.sidebar.button("Find course online"):
+    st.session_state.selected_course_id = None
+    st.session_state.course_matches = []
     try:
-        st.session_state.course_matches = cached_course_search(course_query)
+        st.session_state.course_matches = cached_course_search(course_query, gca_key, country_hint)
+        if not st.session_state.course_matches:
+            st.sidebar.warning("No course matches returned. Try a shorter course name or add/change the country hint.")
     except Exception as exc:
         st.sidebar.error(str(exc))
 
 selected_course = None
 if st.session_state.course_matches:
-    labels = [f"{r['name']} — {r['city']}, {r['state']}".strip(" —,") for r in st.session_state.course_matches]
+    labels = [f"{r['name']} — {r['city']}, {r['state']}, {r['country']}".strip(" —,") for r in st.session_state.course_matches]
     choice = st.sidebar.selectbox("Matched course", range(len(labels)), format_func=lambda i: labels[i])
     selected_course = st.session_state.course_matches[choice]
     st.session_state.selected_course_id = selected_course["id"]
@@ -85,8 +91,8 @@ if holes_up is not None:
     holes = pd.read_csv(holes_up); holes_source = "uploaded"
 elif st.session_state.selected_course_id:
     try:
-        holes = cached_course_holes(st.session_state.selected_course_id, tournament_name)
-        holes_source = "OpenGolfAPI" if not holes.empty else "online source returned no holes"
+        holes, selected_detail = cached_course_holes(st.session_state.selected_course_id, tournament_name, gca_key)
+        holes_source = "Golf Courses API" if not holes.empty else "course found; scorecard/holes unavailable"
     except Exception as exc:
         holes = pd.DataFrame(); holes_source = f"failed: {exc}"
 else:
@@ -97,7 +103,7 @@ if weather_up is not None:
     weather = pd.read_csv(weather_up); weather_source = "uploaded"
 elif st.session_state.selected_course_id:
     try:
-        weather = cached_weather(st.session_state.selected_course_id, tournament_name, tournament_start)
+        weather = cached_weather(st.session_state.selected_course_id, tournament_name, tournament_start, gca_key)
         weather_source = "Open-Meteo"
     except Exception as exc:
         weather = pd.DataFrame(); weather_source = f"failed: {exc}"
@@ -119,7 +125,7 @@ for name, up, df in [("player_stats.csv",stats_up,player_stats),("results.csv",r
     if up is not None: st.sidebar.success(f"{name}: uploaded")
     elif not df.empty: st.sidebar.warning(f"{name}: repository fallback")
     else: st.sidebar.info(f"{name}: not supplied")
-(st.sidebar.success if holes_source in ("uploaded","OpenGolfAPI") else st.sidebar.warning)(f"course_holes: {holes_source}")
+(st.sidebar.success if holes_source in ("uploaded","Golf Courses API") else st.sidebar.warning)(f"course_holes: {holes_source}")
 (st.sidebar.success if weather_source in ("uploaded","Open-Meteo") else st.sidebar.warning)(f"weather: {weather_source}")
 
 # Prevent a stale keyed file from silently masquerading as this week's tournament.
@@ -137,10 +143,10 @@ st.sidebar.success(f"{tournament_name} — {course_query}")
 sims=st.sidebar.selectbox("Monte Carlo simulations",[25000,50000,100000],index=1)
 
 # Make the limitations visible rather than silently implying full automation.
-with st.expander("V10.6 source coverage", expanded=True):
+with st.expander("V10.6.2 source coverage", expanded=True):
     c1,c2,c3,c4=st.columns(4)
-    c1.metric("DK field", "Manual ✓")
-    c2.metric("Course/holes", "Auto ✓" if holes_source=="OpenGolfAPI" else holes_source)
+    c1.metric("DK field", "Uploaded ✓" if dk_ready else "Awaiting upload")
+    c2.metric("Course/holes", "Auto ✓" if holes_source=="Golf Courses API" else holes_source)
     c3.metric("Weather", "Auto ✓" if weather_source=="Open-Meteo" else weather_source)
     advanced_fresh=sum(x is not None for x in (stats_up,results_up,history_up))
     c4.metric("Advanced stats/form/history", f"{advanced_fresh}/3 fresh uploads")
@@ -199,4 +205,4 @@ else:
         except Exception as exc: st.error(str(exc))
 
 st.divider()
-st.caption("V10.6 ingestion release. OpenGolfAPI course data © OpenStreetMap contributors (ODbL 1.0) via OpenGolfAPI. Weather: Open-Meteo (CC BY 4.0).")
+st.caption("V10.6.2 ingestion release. International course data: Golf Courses API. Weather: Open-Meteo. Predictive model/optimizer unchanged.")

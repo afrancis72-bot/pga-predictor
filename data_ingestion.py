@@ -1,137 +1,175 @@
-"""V10.6 internet ingestion adapters.
+"""V10.6.2 international course/weather ingestion adapters.
 
-Only sources whose published access terms support automated API use are included.
-Predictive logic lives elsewhere; this module only fetches/normalizes inputs.
+This module fetches and normalizes external inputs only. Predictive logic is unchanged.
+Golf Courses API: international course search/detail/scorecards (free API key required).
+Open-Meteo: weather by course coordinates.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import date, timedelta
+from difflib import SequenceMatcher
 from typing import Any
+import re
 import requests
 import pandas as pd
 
-OPEN_GOLF = "https://api.opengolfapi.org"
+GCA = "https://www.golfcoursesapi.com/api/v1"
 OPEN_METEO = "https://api.open-meteo.com/v1/forecast"
-UA = "PGA-Predictor-V10.6/1.0"
+UA = "PGA-Predictor-V10.6.2/1.0"
 
 class IngestionError(RuntimeError):
     pass
 
-def _get_json(url: str, *, params: dict | None = None, timeout: int = 20) -> Any:
+def _norm(s: Any) -> str:
+    s = str(s or "").casefold()
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    return " ".join(s.split())
+
+def _headers(api_key: str | None = None) -> dict:
+    h = {"User-Agent": UA, "Accept": "application/json"}
+    if api_key:
+        # GCA keys are bearer credentials. X-API-Key is included as a compatibility
+        # header so a provider-side auth convention change produces a useful HTTP
+        # response instead of a silent UI failure.
+        h["Authorization"] = f"Bearer {api_key.strip()}"
+        h["X-API-Key"] = api_key.strip()
+    return h
+
+def _get_json(url: str, *, params: dict | None = None, api_key: str | None = None, timeout: int = 20) -> Any:
     try:
-        r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": UA})
-        r.raise_for_status()
+        r = requests.get(url, params=params, timeout=timeout, headers=_headers(api_key))
+    except requests.RequestException as exc:
+        raise IngestionError(f"Network error contacting course/weather source: {exc}") from exc
+    if not r.ok:
+        body = (r.text or "").strip().replace("\n", " ")[:240]
+        hint = ""
+        if r.status_code in (401, 403):
+            hint = " Check the Golf Courses API key in the sidebar."
+        elif r.status_code == 429:
+            hint = " The API rate limit was reached; try again later."
+        raise IngestionError(f"Source returned HTTP {r.status_code}.{hint} {body}".strip())
+    try:
         return r.json()
-    except Exception as exc:
-        raise IngestionError(f"Internet ingestion failed: {exc}") from exc
+    except ValueError as exc:
+        raise IngestionError("Source returned a non-JSON response.") from exc
 
 def _records(payload: Any) -> list[dict]:
     if isinstance(payload, list):
         return [x for x in payload if isinstance(x, dict)]
     if isinstance(payload, dict):
         for key in ("data", "results", "courses", "items"):
-            if isinstance(payload.get(key), list):
-                return [x for x in payload[key] if isinstance(x, dict)]
-        # Some OpenGolf endpoints return a single object.
-        if payload:
-            return [payload]
+            val = payload.get(key)
+            if isinstance(val, list):
+                return [x for x in val if isinstance(x, dict)]
+            if isinstance(val, dict):
+                return [val]
+        return [payload] if payload else []
     return []
 
-def search_courses(query: str, limit: int = 10) -> list[dict]:
+def search_courses(query: str, api_key: str, country_hint: str = "", limit: int = 15) -> list[dict]:
     if not query.strip():
-        return []
-    payload = _get_json(f"{OPEN_GOLF}/v1/courses/search", params={"q": query.strip(), "limit": limit})
+        raise IngestionError("Enter a course name before searching.")
+    if not api_key.strip():
+        raise IngestionError("Golf Courses API key is required for international course lookup.")
+    payload = _get_json(f"{GCA}/courses", params={"q": query.strip(), "per_page": min(limit, 25)}, api_key=api_key)
     rows = _records(payload)
+    qn, cn = _norm(query), _norm(country_hint)
     out = []
     for row in rows:
-        cid = row.get("id") or row.get("course_id") or row.get("slug")
-        name = row.get("name") or row.get("course_name") or row.get("display_name")
-        city = row.get("city") or (row.get("location") or {}).get("city") if isinstance(row.get("location"), dict) else row.get("city")
-        state = row.get("state") or (row.get("location") or {}).get("state") if isinstance(row.get("location"), dict) else row.get("state")
-        if cid and name:
-            out.append({"id": str(cid), "name": str(name), "city": city or "", "state": state or "", "raw": row})
-    return out
+        cid = row.get("id") or row.get("course_id")
+        name = row.get("name") or row.get("course_name") or row.get("club")
+        if cid is None or not name:
+            continue
+        city = row.get("city") or ""
+        state = row.get("state") or row.get("province") or ""
+        country = row.get("country") or ""
+        club = row.get("club") or ""
+        hay = _norm(" ".join(map(str, (name, club, city, state, country))))
+        score = SequenceMatcher(None, qn, _norm(name)).ratio()
+        if qn and qn in hay: score += 0.35
+        if cn and cn in hay: score += 0.30
+        out.append({
+            "id": str(cid), "name": str(name), "club": str(club),
+            "city": str(city), "state": str(state), "country": str(country),
+            "latitude": row.get("latitude"), "longitude": row.get("longitude"),
+            "match_score": round(score, 3), "raw": row,
+        })
+    out.sort(key=lambda x: x["match_score"], reverse=True)
+    return out[:limit]
 
-def fetch_course_detail(course_id: str) -> dict:
-    payload = _get_json(f"{OPEN_GOLF}/v1/courses/{course_id}")
+def fetch_course_detail(course_id: str, api_key: str) -> dict:
+    payload = _get_json(f"{GCA}/courses/{course_id}", api_key=api_key)
     rows = _records(payload)
     return rows[0] if rows else {}
 
-def fetch_course_holes(course_id: str, tournament: str) -> pd.DataFrame:
-    payload = _get_json(f"{OPEN_GOLF}/v1/courses/{course_id}/holes")
-    rows = _records(payload)
-    # Endpoint shapes can nest holes under a course object.
-    if len(rows) == 1 and isinstance(rows[0].get("holes"), list):
-        rows = [x for x in rows[0]["holes"] if isinstance(x, dict)]
-    normalized = []
-    for i, row in enumerate(rows, start=1):
-        hole = row.get("hole") or row.get("number") or row.get("hole_number") or i
-        par = row.get("par")
-        yardage = row.get("yardage") or row.get("yards")
+def _extract_holes(detail: dict) -> list[dict]:
+    # Direct holes shape.
+    if isinstance(detail.get("holes"), list):
+        return [x for x in detail["holes"] if isinstance(x, dict)]
+    # Scorecard/tees shapes. Prefer the longest tee because PGA events generally
+    # play near championship yardages; par is course-level and stable across tees.
+    tees = detail.get("tees") or detail.get("teeboxes") or detail.get("tee_boxes") or detail.get("scorecards")
+    if isinstance(tees, dict): tees = list(tees.values())
+    if isinstance(tees, list):
+        candidates=[]
+        for tee in tees:
+            if not isinstance(tee, dict): continue
+            holes = tee.get("holes") or tee.get("scorecard")
+            if isinstance(holes, list):
+                total=0
+                for h in holes:
+                    if isinstance(h, dict):
+                        try: total += float(h.get("yardage") or h.get("yards") or h.get("length") or 0)
+                        except (TypeError, ValueError): pass
+                candidates.append((total, holes))
+        if candidates:
+            return max(candidates, key=lambda x:x[0])[1]
+    return []
+
+def fetch_course_holes(course_id: str, tournament: str, api_key: str) -> tuple[pd.DataFrame, dict]:
+    detail = fetch_course_detail(course_id, api_key)
+    rows = _extract_holes(detail)
+    normalized=[]
+    for i,row in enumerate(rows,start=1):
         normalized.append({
             "tournament": tournament,
-            "hole": hole,
-            "par": par,
-            "yardage": yardage,
-            # Unknown DNA fields remain neutral, matching model defaults.
-            "fairway_width": 30.0,
-            "rough_severity": 0.5,
-            "water": 0.5,
-            "bunker_density": 0.5,
-            "green_size": 6000.0,
-            "wind_exposure": 0.5,
+            "hole": row.get("hole") or row.get("number") or row.get("hole_number") or i,
+            "par": row.get("par"),
+            "yardage": row.get("yardage") or row.get("yards") or row.get("length"),
+            # Unknown course-DNA fields stay neutral; no fabricated course edge.
+            "fairway_width": 30.0, "rough_severity": 0.5, "water": 0.5,
+            "bunker_density": 0.5, "green_size": 6000.0, "wind_exposure": 0.5,
             "elevation_change": 25.0,
         })
-    df = pd.DataFrame(normalized)
+    df=pd.DataFrame(normalized)
     if not df.empty:
-        df["par"] = pd.to_numeric(df["par"], errors="coerce")
-        df["yardage"] = pd.to_numeric(df["yardage"], errors="coerce")
-    return df
+        df["par"]=pd.to_numeric(df["par"],errors="coerce")
+        df["yardage"]=pd.to_numeric(df["yardage"],errors="coerce")
+    return df, detail
 
-def _coords(detail: dict) -> tuple[float, float] | None:
-    candidates = [detail]
-    if isinstance(detail.get("location"), dict): candidates.append(detail["location"])
-    if isinstance(detail.get("coordinates"), dict): candidates.append(detail["coordinates"])
+def _coords(detail: dict) -> tuple[float,float] | None:
+    candidates=[detail]
+    for key in ("location","coordinates"):
+        if isinstance(detail.get(key),dict): candidates.append(detail[key])
     for obj in candidates:
-        lat = obj.get("latitude", obj.get("lat"))
-        lon = obj.get("longitude", obj.get("lon", obj.get("lng")))
+        lat=obj.get("latitude",obj.get("lat")); lon=obj.get("longitude",obj.get("lon",obj.get("lng")))
         try:
-            if lat is not None and lon is not None:
-                return float(lat), float(lon)
-        except (TypeError, ValueError):
-            pass
+            if lat is not None and lon is not None: return float(lat),float(lon)
+        except (TypeError,ValueError): pass
     return None
 
-def fetch_weather(detail: dict, tournament: str, start_date: date | None = None, days: int = 7) -> pd.DataFrame:
-    coords = _coords(detail)
-    if not coords:
-        raise IngestionError("Selected course did not provide latitude/longitude; upload weather.csv instead.")
-    lat, lon = coords
-    start = start_date or date.today()
-    end = start + timedelta(days=max(1, min(days, 16)) - 1)
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "hourly": "temperature_2m,precipitation_probability,wind_speed_10m,wind_gusts_10m",
-        "temperature_unit": "fahrenheit",
-        "wind_speed_unit": "mph",
-        "precipitation_unit": "inch",
-        "timezone": "auto",
-        "start_date": start.isoformat(),
-        "end_date": end.isoformat(),
-    }
-    payload = _get_json(OPEN_METEO, params=params)
-    hourly = payload.get("hourly", {}) if isinstance(payload, dict) else {}
-    times = hourly.get("time", [])
-    if not times:
-        raise IngestionError("Open-Meteo returned no hourly forecast for the selected course/date window.")
-    df = pd.DataFrame({
-        "tournament": tournament,
-        "time": times,
-        "temperature_f": hourly.get("temperature_2m", []),
-        "rain_prob": hourly.get("precipitation_probability", []),
-        "wind_mph": hourly.get("wind_speed_10m", []),
-        "wind_gust_mph": hourly.get("wind_gusts_10m", []),
+def fetch_weather(detail: dict, tournament: str, start_date: date | None=None, days: int=7) -> pd.DataFrame:
+    coords=_coords(detail)
+    if not coords: raise IngestionError("Selected course has no latitude/longitude; upload weather.csv instead.")
+    lat,lon=coords; start=start_date or date.today(); end=start+timedelta(days=max(1,min(days,16))-1)
+    payload=_get_json(OPEN_METEO,params={
+        "latitude":lat,"longitude":lon,
+        "hourly":"temperature_2m,precipitation_probability,wind_speed_10m,wind_gusts_10m",
+        "temperature_unit":"fahrenheit","wind_speed_unit":"mph","precipitation_unit":"inch",
+        "timezone":"auto","start_date":start.isoformat(),"end_date":end.isoformat(),
     })
-    return df
+    hourly=payload.get("hourly",{}) if isinstance(payload,dict) else {}; times=hourly.get("time",[])
+    if not times: raise IngestionError("Open-Meteo returned no hourly forecast for the selected course/date window.")
+    return pd.DataFrame({"tournament":tournament,"time":times,
+        "temperature_f":hourly.get("temperature_2m",[]),"rain_prob":hourly.get("precipitation_probability",[]),
+        "wind_mph":hourly.get("wind_speed_10m",[]),"wind_gust_mph":hourly.get("wind_gusts_10m",[])})
