@@ -10,7 +10,7 @@ from pga_predictor_pro import Config, predict_from_dataframes
 
 ROOT = Path(__file__).resolve().parent
 st.set_page_config(page_title="PGA Predictor Pro", page_icon="⛳", layout="wide")
-st.title("⛳ PGA Predictor Pro — Tournament Model V10.6.6")
+st.title("⛳ PGA Predictor Pro — Tournament Model V10.6.6b")
 st.caption("$0 course/weather ingestion + DraftKings field + OTIS Advanced Course-Fit player layer")
 
 @st.cache_data
@@ -235,6 +235,14 @@ def normalize_dk_players(df):
         & (work["salary"] > 0)
     ].copy()
     work["salary"] = work["salary"].astype(int)
+
+    # DraftKings native salary exports can flag withdrawn/inactive golfers in a Status column.
+    # Treat OUT as a hard exclusion before simulation so an inactive golfer can never reach
+    # projections or the optimizer. Preserve every other status unchanged.
+    status_col = next((lookup[k] for k in ("status", "player status") if k in lookup), None)
+    if status_col is not None:
+        status = work[status_col].fillna("").astype(str).str.strip().str.casefold()
+        work = work[~status.isin({"out"})].copy()
 
     # A native salary file should contain one row per golfer; protect the model from duplicates.
     work = work.drop_duplicates(subset=["player"], keep="first").reset_index(drop=True)
