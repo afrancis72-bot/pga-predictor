@@ -438,7 +438,7 @@ if dk_ready and not otis_fit.empty:
     if otis_match_count == len(dk_names):
         st.sidebar.success(f"DK ↔ OTIS match: {otis_match_count}/{len(dk_names)} ✓")
     else:
-        st.sidebar.warning(f"DK ↔ OTIS match: {otis_match_count}/{len(dk_names)}; {len(otis_unmatched)} unmatched")
+        st.sidebar.warning(f"DK ↔ OTIS coverage: {otis_match_count}/{len(dk_names)}; {len(otis_unmatched)} using neutral fallback")
 
 # Prevent a stale keyed file from silently masquerading as this week's tournament.
 def tournament_coverage(df):
@@ -464,9 +464,9 @@ with st.expander("V10.6.6 source coverage", expanded=True):
     if otis_fit_up is None:
         st.warning("Upload the weekly OTIS Advanced Course-Fit CSV before treating projections as production-ready.")
     elif dk_ready and otis_match_count < len(players):
-        st.warning("OTIS does not match every DK golfer. Unmatched golfers receive no OTIS signal; review names before production use.")
+        st.warning(f"OTIS coverage is {otis_match_count}/{len(players)} ({otis_match_count/len(players):.1%}). The {len(players)-otis_match_count} unmatched golfers remain in the field and use the model neutral baseline for OTIS Skill/Form/Fit rather than being assigned zero strength.")
     elif dk_ready:
-        st.success("Weekly player layer complete: DK field and OTIS Advanced Course-Fit match across the full field.")
+        st.success("Weekly player layer complete: full DK ↔ OTIS coverage.")
 
 if "prediction" not in st.session_state: st.session_state.prediction=None; st.session_state.prediction_key=None
 run_key=(tournament_name,course_query,str(tournament_start),sims,getattr(players_up,"name",None),getattr(otis_fit_up,"name",None),getattr(stats_up,"name",None),getattr(results_up,"name",None),getattr(history_up,"name",None),holes_source,weather_source,st.session_state.selected_course_id, selected_course.get("source") if selected_course else None)
@@ -483,8 +483,10 @@ if st.button("Build current-week projections", type="primary"):
         st.error("Upload the OTIS Advanced Course-Fit CSV before building production projections.")
     elif otis_fit.empty:
         st.error(f"OTIS Course-Fit CSV could not be used: {otis_fit_status}.")
-    elif otis_match_count < len(players):
-        st.error(f"OTIS matches {otis_match_count}/{len(players)} DK golfers. Resolve the unmatched names before building projections.")
+    elif otis_match_count == 0:
+        st.error("None of the DraftKings golfers matched the OTIS file. Check that the correct weekly OTIS export was uploaded.")
+    elif otis_match_count / len(players) < 0.70:
+        st.error(f"OTIS coverage is only {otis_match_count}/{len(players)} ({otis_match_count/len(players):.1%}). This is below the 70% safety floor; verify the weekly files before building projections.")
     elif stats_up is not None and stats_status != "valid":
         st.error(f"Uploaded player_stats.csv is {stats_status}.")
     elif results_up is not None and results_status != "valid":

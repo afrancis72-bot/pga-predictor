@@ -48,3 +48,7 @@ Recommended advanced columns: Fit: APP, Fit: OTT, Fit: ARG, Fit: PUTT, Fit: Hist
 The app deliberately does not use OTIS Rank or OTIS Model as predictive inputs. They may be retained for audit only. True Skill anchors player quality; Form and Course Fit enter as bounded, sample-aware tilts. Form rds and Venue rds are used for reliability shrinkage. Missing values remain missing rather than being converted to zero.
 
 The current DraftKings salary CSV remains the authority for the contest field and salary. The app requires a full DK-to-OTIS name match before building production projections.
+
+
+## V10.6.6a partial OTIS coverage
+A full OTIS match is preferred but not required. If at least 70% of the DraftKings field matches, unmatched golfers remain in the simulation and receive a neutral OTIS Skill/Form/Fit contribution (missing OTIS values are not converted into poor-player scores). Coverage below 70% blocks the production build as a wrong-file/matching safety check.
