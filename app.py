@@ -7,10 +7,11 @@ import streamlit as st
 from international_ingestion import search_courses, geocode_course, location_detail, fetch_course_detail, fetch_course_holes, fetch_weather, IngestionError
 from portfolio_optimizer import PortfolioSettings, optimize_portfolio
 from pga_predictor_pro import Config, predict_from_dataframes
+from round_parlay import fetch_groupings, normalize_groupings_upload, fetch_live_results, normalize_live_results, build_round_ratings, simulate_groups, build_six_leg_tickets, golfchannel_round_url
 
 ROOT = Path(__file__).resolve().parent
 st.set_page_config(page_title="PGA Predictor Pro", page_icon="⛳", layout="wide")
-st.title("⛳ PGA Predictor Pro — Tournament Model V10.6.6b")
+st.title("⛳ PGA Predictor Pro — Tournament Model V10.7.0")
 st.caption("$0 course/weather ingestion + DraftKings field + OTIS Advanced Course-Fit player layer")
 
 @st.cache_data
@@ -520,7 +521,7 @@ if mc is None:
 if st.session_state.prediction_key != run_key:
     st.warning("Tournament settings or weekly inputs changed. Rebuild projections before optimizing."); st.stop()
 
-page=st.sidebar.radio("View",["Model Dashboard","Portfolio Optimizer"])
+page=st.sidebar.radio("View",["Model Dashboard","Portfolio Optimizer","Round 3-Ball / 6-Leg Builder"])
 if page=="Model Dashboard":
     c1,c2,c3,c4=st.columns(4); c1.metric("Field",len(mc)); c2.metric("Simulations",f"{sims:,}"); c3.metric("Salary floor","$6,500"); c4.metric("DK salary cap","$50,000")
     st.subheader(f"{tournament_name} Simulation — {course_query}")
@@ -529,7 +530,7 @@ if page=="Model Dashboard":
     sort_col=st.selectbox("Sort by",sort_options)
     st.dataframe(mc.sort_values(sort_col,ascending=(sort_col=="salary"))[display_cols],width="stretch",hide_index=True)
     st.download_button("Download current-week projections",mc.to_csv(index=False),f"{tournament_name.replace(' ','_')}_projections.csv","text/csv")
-else:
+elif page=="Portfolio Optimizer":
     st.subheader("DraftKings Portfolio Optimizer")
     a,b,c,d=st.columns(4); lineup_count=a.number_input("Lineups",1,20,10); max_exposure=b.slider("Max exposure",0.10,1.00,0.50,0.05); min_unique=c.number_input("Minimum unique golfers",1,5,3); salary_floor=d.number_input("Minimum lineup salary",40000,50000,46500,100)
     min_player_salary=st.number_input("Minimum golfer salary",6000,10000,6500,100); strategy=st.selectbox("Strategy",["GPP Ceiling","Balanced / Single Entry","Cut Equity"])
@@ -543,5 +544,64 @@ else:
             st.download_button("Download lineups CSV",portfolio.to_csv(index=False),"pga_lineups.csv","text/csv"); st.download_button("Download exposure CSV",exposure.to_csv(index=False),"pga_exposure.csv","text/csv")
         except Exception as exc: st.error(str(exc))
 
+else:
+    st.subheader("Round 3-Ball / 6-Leg Parlay Builder")
+    st.caption("Round-specific 3-ball probabilities using True Skill + Course Fit + pre-event Form, with shrunk in-tournament form updates for R2-R4. OTIS Rank/Model are never predictive inputs.")
+    a,b,c,d=st.columns(4)
+    round_no=int(a.selectbox("Round",[1,2,3,4],index=0))
+    round_sims=int(b.selectbox("Round simulations",[25000,50000,100000],index=2))
+    ticket_count=int(c.number_input("6-leg tickets",1,10,5))
+    max_overlap=int(d.slider("Max shared picks between tickets",0,5,4))
+    year=int(tournament_start.year)
+    default_gc=golfchannel_round_url(tournament_name,year,round_no)
+    grouping_url=st.text_input("Public grouping URL",value=default_gc,help="Golf Channel article URL works when published. You can replace it with another public tee-time/grouping page.")
+    grouping_up=st.file_uploader("Grouping CSV fallback (group, tee_time, player1, player2, player3)",type="csv",key=f"groupings_r{round_no}")
+    leaderboard_url=st.text_input("Public leaderboard URL for prior-round form (R2-R4)",value="https://www.pgatour.com/tournaments/pga/playerschamp/index" if round_no>1 else "",disabled=(round_no==1))
+    live_up=st.file_uploader("Prior-round results CSV fallback (player, round, round_score and/or SG components)",type="csv",key=f"live_r{round_no}",disabled=(round_no==1))
+
+    if st.button("Pull groupings + build round model",type="primary"):
+        if otis_fit.empty:
+            st.error("Upload the OTIS Advanced Course-Fit CSV first; the round model requires the Course DNA player layer.")
+        else:
+            if grouping_up is not None:
+                groups=normalize_groupings_upload(pd.read_csv(grouping_up),round_no); gsrc="uploaded grouping CSV"; gnote="manual fallback"
+            else:
+                with st.spinner("Pulling public groupings..."):
+                    groups,gsrc,gnote=fetch_groupings(tournament_name,year,round_no,grouping_url)
+            live=pd.DataFrame(); lnote="R1: no in-tournament adjustment"
+            if round_no>1:
+                if live_up is not None:
+                    live=normalize_live_results(pd.read_csv(live_up)); lnote="uploaded prior-round results"
+                else:
+                    with st.spinner("Pulling prior-round leaderboard data..."):
+                        live,lnote=fetch_live_results(leaderboard_url,round_no)
+            if groups.empty:
+                st.error(f"Could not parse public groupings ({gnote}). Use the grouping CSV fallback so the model never guesses pairings.")
+            else:
+                ratings=build_round_ratings(otis_fit,live,round_no)
+                probs,_=simulate_groups(groups,ratings,n_sims=round_sims,seed=42)
+                summary,legs=build_six_leg_tickets(probs,ticket_count=ticket_count,max_player_overlap=max_overlap)
+                st.session_state.round_parlay={"groups":groups,"ratings":ratings,"probs":probs,"summary":summary,"legs":legs,"gsrc":gsrc,"gnote":gnote,"lnote":lnote,"round":round_no}
+    rp=st.session_state.get("round_parlay")
+    if rp and rp.get("round")==round_no:
+        st.success(f"Round {round_no} model built from {len(rp['groups'])} groups. Grouping source: {rp['gsrc']} ({rp['gnote']}).")
+        if round_no>1:
+            (st.success if not rp['ratings'].empty and rp['ratings'].live_rounds.max()>0 else st.warning)(f"In-tournament form source: {rp['lnote']}")
+        unmatched=rp['probs'][rp['probs'].status.eq('UNMATCHED')] if not rp['probs'].empty else pd.DataFrame()
+        if not unmatched.empty: st.warning(f"{len(unmatched)} grouping names did not match the OTIS player layer and were excluded rather than guessed.")
+        st.subheader("3-Ball probabilities")
+        ok=rp['probs'][rp['probs'].status.eq('OK')].copy()
+        if not ok.empty:
+            st.dataframe(ok.sort_values(['group','win_pct'],ascending=[True,False]),width="stretch",hide_index=True)
+            st.download_button("Download round probabilities",ok.to_csv(index=False),f"round_{round_no}_3ball_probabilities.csv","text/csv")
+        st.subheader("6-Leg ticket portfolio")
+        if rp['summary'].empty:
+            st.warning("Fewer than six fully matched groups are available; no six-leg ticket was created.")
+        else:
+            st.dataframe(rp['summary'],width="stretch",hide_index=True)
+            st.dataframe(rp['legs'],width="stretch",hide_index=True)
+            st.caption("Strict 6/6 = all six selected golfers win outright. All-legs non-loss includes simulated tie/push outcomes. Sportsbook odds are intentionally not assumed; add offered odds later for EV analysis.")
+            st.download_button("Download 6-leg tickets",rp['legs'].to_csv(index=False),f"round_{round_no}_six_leg_tickets.csv","text/csv")
+
 st.divider()
-st.caption("V10.6.6 OTIS Advanced Course-Fit release. Course data: Golf Courses API when available; global location fallback: OpenStreetMap/Nominatim; weather: Open-Meteo. Predictive model/optimizer unchanged. OpenStreetMap data © OpenStreetMap contributors, ODbL.")
+st.caption("V10.7.0 adds the Round 3-Ball / 6-Leg Builder. Existing V10.6.6b tournament projection and DFS optimizer logic is preserved. Round model uses OTIS True Skill/Course Fit/Form plus shrunk prior-round evidence for R2-R4; public grouping/leaderboard ingestion has CSV fallbacks and never guesses missing groupings.")
