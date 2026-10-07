@@ -1,10 +1,83 @@
-import re, math
+import re, math, json, gzip, base64, os
 from io import StringIO
 import numpy as np
 import pandas as pd
 import requests
 
 UA={"User-Agent":"Mozilla/5.0 (compatible; PGA-Parlay-Model/1.0)"}
+
+
+PGA_GRAPHQL_URL="https://orchestrator.pgatour.com/graphql"
+PGA_REST_URL="https://data-api.pgatour.com"
+PGA_API_KEY_DEFAULT="da2-gsrx5bibzbb4njvhl7t37wqyl4"
+
+def _pga_headers():
+    return {
+        "User-Agent": UA["User-Agent"], "Content-Type":"application/json",
+        "Accept":"application/graphql-response+json, application/json",
+        "x-api-key": os.environ.get("PGA_API_KEY") or PGA_API_KEY_DEFAULT,
+        "x-pgat-platform":"web", "Origin":"https://www.pgatour.com",
+        "Referer":"https://www.pgatour.com/"
+    }
+
+def _pga_graphql(query, variables, operation):
+    body={"query":query,"variables":variables,"operationName":operation}
+    last=None
+    for _ in range(3):
+        try:
+            r=requests.post(PGA_GRAPHQL_URL,headers=_pga_headers(),json=body,timeout=30)
+            r.raise_for_status(); obj=r.json()
+            if obj.get("errors"): raise RuntimeError(str(obj["errors"][0].get("message",obj["errors"][0])))
+            return obj.get("data") or {}
+        except Exception as e: last=e
+    raise last
+
+def _decompress_payload(payload):
+    raw=base64.b64decode(payload)
+    try: raw=gzip.decompress(raw)
+    except OSError: pass
+    return json.loads(raw.decode("utf-8"))
+
+def _find_tournament_id(tournament, year):
+    # Official PGA TOUR schedule REST endpoint; recurse because the envelope has changed over time.
+    r=requests.get(f"{PGA_REST_URL}/schedule/R/{int(year)}",headers={"User-Agent":UA["User-Agent"]},timeout=30)
+    r.raise_for_status(); obj=r.json(); target=_norm(tournament)
+    candidates=[]
+    def walk(x):
+        if isinstance(x,dict):
+            vals=' '.join(str(v) for v in x.values() if isinstance(v,(str,int,float)))
+            if target and target in _norm(vals):
+                for k,v in x.items():
+                    if isinstance(v,str) and re.fullmatch(r"R\d{7}",v): candidates.append(v)
+                    if 'id' in str(k).casefold() and isinstance(v,str) and re.fullmatch(r"R\d{7}",v): candidates.append(v)
+            for v in x.values(): walk(v)
+        elif isinstance(x,list):
+            for v in x: walk(v)
+    walk(obj)
+    return candidates[0] if candidates else ''
+
+def _api_groupings(tournament, year, round_no, tournament_id=''):
+    tid=str(tournament_id or '').strip()
+    if not re.fullmatch(r"R\d{7}",tid):
+        tid=_find_tournament_id(tournament,year)
+    if not tid: return pd.DataFrame(),'', 'PGA TOUR API could not resolve tournament ID'
+    q='query TeeTimesCompressedV2($teeTimesCompressedV2Id: ID!) { teeTimesCompressedV2(id: $teeTimesCompressedV2Id) { id payload } }'
+    data=_pga_graphql(q,{"teeTimesCompressedV2Id":tid},"TeeTimesCompressedV2")
+    node=data.get("teeTimesCompressedV2") or {}; payload=node.get("payload")
+    if not payload: return pd.DataFrame(),tid,'PGA TOUR API returned no tee-time payload'
+    parsed=_decompress_payload(payload); rec=[]
+    for rnd in parsed.get("rounds") or []:
+        if int(rnd.get("roundInt") or 0)!=int(round_no): continue
+        for g in rnd.get("groups") or []:
+            players=g.get("players") or []
+            if len(players)!=3: continue
+            names=[(x.get("displayName") or (str(x.get("firstName") or '')+' '+str(x.get("lastName") or '')).strip()).strip() for x in players]
+            ts=g.get("teeTime")
+            tee_time=pd.to_datetime(ts,unit='ms',utc=True).strftime('%Y-%m-%d %H:%M UTC') if ts else ''
+            rec.append({"group":g.get("groupNumber"),"tee_time":tee_time,"tee":g.get("startTee",''),
+                        "player1":names[0],"player2":names[1],"player3":names[2],"round":round_no})
+    out=_validate_groups(pd.DataFrame(rec),round_no)
+    return out,tid,(f'official PGA TOUR TeeTimes API ({len(out)} groups)' if not out.empty else f'PGA TOUR API has no valid R{round_no} groups yet')
 
 def _norm(s):
     return re.sub(r"[^a-z0-9]+"," ",str(s).casefold()).strip()
@@ -81,44 +154,30 @@ def _parse_pgatour_tables(html, round_no):
         if not out.empty: return out
     return pd.DataFrame()
 
-def fetch_groupings(tournament, year, round_no, source_url=""):
-    """PGA TOUR first; supplied URL and Golf Channel article are fallbacks."""
+def fetch_groupings(tournament, year, round_no, source_url="", tournament_id=""):
+    """Official PGA TOUR TeeTimes API first; rendered pages/articles are fallbacks."""
+    errors=[]
+    try:
+        df,tid,note=_api_groupings(tournament,year,round_no,tournament_id)
+        if not df.empty: return df,f"PGA TOUR API {tid}",note
+        errors.append(note)
+    except Exception as e:
+        errors.append(f"PGA TOUR API: {e}")
+
     urls=[]
-    # PGA TOUR public pages are primary. Search-derived/current tournament URLs can be pasted,
-    # while these stable public endpoints frequently expose the active tournament's rendered data.
-    urls.extend([
-        'https://www.pgatour.com/tournaments/pga/playerschamp/index/tee-times',
-        'https://www.pgatour.com/tournaments/pga/playerschamp/index',
-    ])
     if source_url.strip(): urls.append(source_url.strip())
     urls.append(golfchannel_round_url(tournament,year,round_no))
-    errors=[]
     for u in dict.fromkeys(urls):
         try:
             html=fetch_text(u)
             if 'pgatour.com' in u:
                 df=_parse_pgatour_tables(html,round_no)
-                if not df.empty: return df,u,f'PGA TOUR official table ({len(df)} groups)'
-            # Generic HTML tables, including user-pasted official tee-time pages.
-            try:
-                tabs=pd.read_html(StringIO(html))
-                for t in tabs:
-                    cols=[_norm(c) for c in t.columns]
-                    if len(t.columns)>=4 and any('time' in c for c in cols):
-                        rec=[]
-                        for _,row in t.iterrows():
-                            vals=[str(v).strip() for v in row.tolist() if str(v).strip() not in ('','nan')]
-                            if len(vals)>=4:
-                                names=vals[-3:]
-                                rec.append({'tee_time':vals[0],'tee':'','player1':names[0],'player2':names[1],'player3':names[2]})
-                        df=_validate_groups(pd.DataFrame(rec),round_no)
-                        if not df.empty: return df,u,f'validated HTML table ({len(df)} groups)'
-            except Exception: pass
+                if not df.empty: return df,u,f'PGA TOUR rendered table ({len(df)} groups)'
             df=_validate_groups(parse_groupings_text(html,round_no),round_no)
             if not df.empty: return df,u,f'validated article text ({len(df)} groups)'
             errors.append(f'No valid 3-player groups parsed from {u}')
         except Exception as e: errors.append(f'{u}: {e}')
-    return pd.DataFrame(),'', '; '.join(errors[-3:])
+    return pd.DataFrame(),'', '; '.join(errors[-4:])
 
 def normalize_groupings_upload(df, round_no):
     if df is None or df.empty: return pd.DataFrame()

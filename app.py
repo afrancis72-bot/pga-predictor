@@ -554,6 +554,8 @@ else:
     max_overlap=int(d.slider("Max shared picks between tickets",0,5,4))
     year=int(tournament_start.year)
     default_group_url="https://www.pgatour.com/tournaments/pga/playerschamp/index/tee-times"
+    default_tid="R2026527" if "baycurrent" in str(tournament_name).casefold() and year==2026 else ""
+    tournament_id=st.text_input("PGA TOUR tournament ID",value=default_tid,help="Official PGA TOUR event ID. The app also tries to resolve this from the PGA TOUR schedule automatically.")
     grouping_url=st.text_input("Public grouping URL (fallback/override)",value=default_group_url,help="The app tries PGA TOUR first. Paste a tournament-specific PGA TOUR tee-times URL here if needed; Golf Channel round articles remain a fallback.")
     grouping_up=st.file_uploader("Grouping CSV fallback (group, tee_time, player1, player2, player3)",type="csv",key=f"groupings_r{round_no}")
     leaderboard_url=st.text_input("Public leaderboard URL for prior-round form (R2-R4)",value="https://www.pgatour.com/tournaments/pga/playerschamp/index" if round_no>1 else "",disabled=(round_no==1))
@@ -567,7 +569,7 @@ else:
                 groups=normalize_groupings_upload(pd.read_csv(grouping_up),round_no); gsrc="uploaded grouping CSV"; gnote="manual fallback"
             else:
                 with st.spinner("Pulling public groupings..."):
-                    groups,gsrc,gnote=fetch_groupings(tournament_name,year,round_no,grouping_url)
+                    groups,gsrc,gnote=fetch_groupings(tournament_name,year,round_no,grouping_url,tournament_id)
             live=pd.DataFrame(); lnote="R1: no in-tournament adjustment"
             if round_no>1:
                 if live_up is not None:
@@ -604,4 +606,4 @@ else:
             st.download_button("Download 6-leg tickets",rp['legs'].to_csv(index=False),f"round_{round_no}_six_leg_tickets.csv","text/csv")
 
 st.divider()
-st.caption("V10.7.1 hardens grouping ingestion with PGA TOUR-first validated 3-player groups. V10.7.0 adds the Round 3-Ball / 6-Leg Builder. Existing V10.6.6b tournament projection and DFS optimizer logic is preserved. Round model uses OTIS True Skill/Course Fit/Form plus shrunk prior-round evidence for R2-R4; public grouping/leaderboard ingestion has CSV fallbacks and never guesses missing groupings.")
+st.caption("V10.7.2 uses the official PGA TOUR TeeTimes API (with schedule-based tournament-ID discovery) before any HTML fallback. V10.7.1 hardened grouping ingestion with PGA TOUR-first validated 3-player groups. V10.7.0 adds the Round 3-Ball / 6-Leg Builder. Existing V10.6.6b tournament projection and DFS optimizer logic is preserved. Round model uses OTIS True Skill/Course Fit/Form plus shrunk prior-round evidence for R2-R4; public grouping/leaderboard ingestion has CSV fallbacks and never guesses missing groupings.")
