@@ -223,7 +223,7 @@ def _baycurrent_independent_fit(o):
     fallback=pd.to_numeric(o.get('otis_course_fit',50),errors='coerce').fillna(50)
     return (num/den.replace(0,np.nan)).fillna(fallback).clip(1,99)
 
-def build_round_ratings(otis, live_results, round_no, tournament_name=''):
+def build_round_ratings(otis, live_results, round_no, tournament_name='', use_course_dna=True):
     """Round-specific latent strength. OTIS Rank/Model intentionally ignored."""
     o=otis.copy()
     if o.empty: return pd.DataFrame()
@@ -232,11 +232,11 @@ def build_round_ratings(otis, live_results, round_no, tournament_name=''):
     ts=pd.to_numeric(o.get('otis_true_skill',50),errors='coerce').fillna(50)
     generic_cf=pd.to_numeric(o.get('otis_course_fit',50),errors='coerce').fillna(50)
     is_baycurrent=('baycurrent' in str(tournament_name).casefold() or 'yokohama' in str(tournament_name).casefold())
-    cf=_baycurrent_independent_fit(o) if is_baycurrent else generic_cf
+    cf=_baycurrent_independent_fit(o) if (is_baycurrent and use_course_dna) else generic_cf
     fm=pd.to_numeric(o.get('otis_form',50),errors='coerce').fillna(50)
     pre=0.62*ts + 0.23*cf + 0.15*fm
     o['course_fit_signal']=cf
-    o['course_fit_source']='Independent Yokohama DNA' if is_baycurrent else 'OTIS Course Fit'
+    o['course_fit_source']='Independent Yokohama DNA' if (is_baycurrent and use_course_dna) else 'OTIS Course Fit'
     o['pre_round_rating']=pre.clip(1,99)
     o['live_form_adj']=0.0
     o['live_rounds']=0

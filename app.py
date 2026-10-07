@@ -288,7 +288,7 @@ page = st.sidebar.radio(
     ["🏠 Setup / Inputs", "🏆 Tournament DFS", "🎯 Round Parlays", "🧬 Course DNA", "📊 Results / Calibration"],
     index=0,
 )
-st.sidebar.caption("V10.9.1 • independent Course DNA feeds DFS + Round Parlays")
+st.sidebar.caption("V10.9.4 • Course DNA impact audit")
 
 
 def _course_dna(otis):
@@ -520,13 +520,34 @@ elif page == "🎯 Round Parlays":
                 with st.spinner("Pulling prior-round data..."): live,lnote=fetch_live_results(leaderboard_url,round_no)
         if groups.empty: st.error(f"Could not load validated groupings ({gnote}). Open the manual fallback only if needed.")
         else:
-            ratings=build_round_ratings(otis_fit,live,round_no,tournament_name=tournament_name); probs,_=simulate_groups(groups,ratings,n_sims=round_sims,seed=42); summary,legs=build_six_leg_tickets(probs,ticket_count=ticket_count,max_player_overlap=max_overlap)
-            st.session_state.round_parlay={"groups":groups,"ratings":ratings,"probs":probs,"summary":summary,"legs":legs,"gsrc":gsrc,"gnote":gnote,"lnote":lnote,"round":round_no}
+            # Main simulation: independent course DNA ON.
+            ratings=build_round_ratings(otis_fit,live,round_no,tournament_name=tournament_name,use_course_dna=True)
+            probs,_=simulate_groups(groups,ratings,n_sims=round_sims,seed=42)
+            summary,legs=build_six_leg_tickets(probs,ticket_count=ticket_count,max_player_overlap=max_overlap)
+
+            # Audit simulation: same groups, same live data, same seed, but course DNA OFF.
+            # This isolates the effect of the independent Yokohama DNA from Monte Carlo noise.
+            ratings_off=build_round_ratings(otis_fit,live,round_no,tournament_name=tournament_name,use_course_dna=False)
+            probs_off,_=simulate_groups(groups,ratings_off,n_sims=round_sims,seed=42)
+            audit=(probs[probs.status.eq("OK")][["group","tee_time","player","round_rating","win_pct","push_pct","non_loss_pct"]]
+                   .merge(probs_off[probs_off.status.eq("OK")][["group","player","round_rating","win_pct","push_pct","non_loss_pct"]],
+                          on=["group","player"],how="left",suffixes=("_dna_on","_dna_off")))
+            audit=audit.merge(ratings[["player","pre_round_rating","course_fit_signal","course_fit_source"]],on="player",how="left")
+            audit["rating_delta"]=audit["round_rating_dna_on"]-audit["round_rating_dna_off"]
+            audit["win_pct_delta"]=audit["win_pct_dna_on"]-audit["win_pct_dna_off"]
+            audit["non_loss_delta"]=audit["non_loss_pct_dna_on"]-audit["non_loss_pct_dna_off"]
+            on_pick=(audit.sort_values(["group","win_pct_dna_on"],ascending=[True,False]).groupby("group",as_index=False).head(1)[["group","player"]].rename(columns={"player":"pick_dna_on"}))
+            off_pick=(audit.sort_values(["group","win_pct_dna_off"],ascending=[True,False]).groupby("group",as_index=False).head(1)[["group","player"]].rename(columns={"player":"pick_dna_off"}))
+            pick_compare=on_pick.merge(off_pick,on="group",how="outer")
+            pick_compare["pick_changed"]=pick_compare["pick_dna_on"]!=pick_compare["pick_dna_off"]
+            audit=audit.merge(pick_compare,on="group",how="left")
+            audit["DNA changed group pick"]=audit["pick_changed"].map({True:"YES",False:"No"})
+            st.session_state.round_parlay={"groups":groups,"ratings":ratings,"probs":probs,"summary":summary,"legs":legs,"gsrc":gsrc,"gnote":gnote,"lnote":lnote,"round":round_no,"audit":audit,"pick_compare":pick_compare}
     rp=st.session_state.get("round_parlay")
     if rp and rp.get("round")==round_no:
         st.success(f"Round {round_no} ready • {len(rp['groups'])} groups • {rp['gsrc']}")
         ok=rp["probs"][rp["probs"].status.eq("OK")].copy()
-        t1,t2=st.tabs(["3-Ball Probabilities","6-Leg Tickets"])
+        t1,t2,t3=st.tabs(["3-Ball Probabilities","6-Leg Tickets","🧬 DNA Impact Audit"])
         with t1:
             st.dataframe(ok.sort_values(["group","win_pct"],ascending=[True,False]),width="stretch",hide_index=True)
             st.download_button("Download probabilities",ok.to_csv(index=False),f"round_{round_no}_3ball_probabilities.csv","text/csv")
@@ -535,6 +556,21 @@ elif page == "🎯 Round Parlays":
             else:
                 st.dataframe(rp["summary"],width="stretch",hide_index=True); st.dataframe(rp["legs"],width="stretch",hide_index=True)
                 st.download_button("Download 6-leg tickets",rp["legs"].to_csv(index=False),f"round_{round_no}_six_leg_tickets.csv","text/csv")
+        with t3:
+            audit=rp.get("audit",pd.DataFrame()).copy()
+            if audit.empty:
+                st.info("Run the round simulation again to create the Course DNA ON vs OFF audit.")
+            else:
+                changed=int(rp.get("pick_compare",pd.DataFrame()).get("pick_changed",pd.Series(dtype=bool)).sum())
+                max_move=float(audit["win_pct_delta"].abs().max()) if len(audit) else 0.0
+                c1,c2,c3=st.columns(3)
+                c1.metric("Groups where DNA changed the pick",changed)
+                c2.metric("Largest win-probability move",f"{max_move:.2f} pts")
+                c3.metric("Course-fit source",str(audit["course_fit_source"].iloc[0]))
+                st.caption("DNA ON and OFF use the same groups, live-round inputs, simulation count and random seed. The delta therefore isolates the independent Course DNA signal rather than Monte Carlo noise.")
+                show=audit[["group","tee_time","player","course_fit_signal","pre_round_rating","round_rating_dna_off","round_rating_dna_on","rating_delta","win_pct_dna_off","win_pct_dna_on","win_pct_delta","non_loss_pct_dna_off","non_loss_pct_dna_on","non_loss_delta","pick_dna_off","pick_dna_on","DNA changed group pick"]].copy()
+                st.dataframe(show.sort_values(["group","win_pct_dna_on"],ascending=[True,False]),width="stretch",hide_index=True)
+                st.download_button("Download DNA impact audit",show.to_csv(index=False),f"round_{round_no}_course_dna_audit.csv","text/csv")
 
 elif page == "🧬 Course DNA":
     st.header("🧬 Course DNA")
@@ -602,4 +638,4 @@ else:
     st.info("As rounds finish, this page will compare predicted win/push/loss probabilities with actual 3-ball outcomes and tournament percentiles. We will evaluate calibration across events rather than tune to one result.")
 
 st.divider()
-st.caption("V10.9.1 Unified PGA Dashboard — independent researched Course DNA now feeds both Tournament DFS and Round Parlays for the 2026 Baycurrent Classic. V10.7.2 official PGA TOUR TeeTimes API, V10.6.6b tournament model, Course-Fit methodology, round simulation, and parlay methodology are preserved. Course DNA adds a transparent reconstruction/audit view from the visible weekly Course-Fit components; it does not invent unavailable granular inputs.")
+st.caption("V10.9.4 Unified PGA Dashboard — independent researched Course DNA now feeds both Tournament DFS and Round Parlays for the 2026 Baycurrent Classic. V10.7.2 official PGA TOUR TeeTimes API, V10.6.6b tournament model, Course-Fit methodology, round simulation, and parlay methodology are preserved. Course DNA adds a transparent reconstruction/audit view from the visible weekly Course-Fit components; it does not invent unavailable granular inputs.")
