@@ -32,34 +32,93 @@ def parse_groupings_text(text, round_no=1):
             out.append({"group":i,"tee_time":m.group('time').strip(),"player1":names[0],"player2":names[1],"player3":names[2],"round":round_no})
     return pd.DataFrame(out)
 
+def _validate_groups(df, round_no):
+    """Accept only plausible 3-player groups; never silently guess pairings."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    need=['player1','player2','player3']
+    if not set(need).issubset(df.columns):
+        return pd.DataFrame()
+    w=df.copy()
+    for c in need:
+        w[c]=w[c].astype(str).str.strip()
+    w=w[(w[need].apply(lambda r: all(2 <= len(x) <= 55 for x in r),axis=1)) &
+        (w[need].apply(lambda r: len(set(x.casefold() for x in r))==3,axis=1))].copy()
+    if w.empty: return w
+    w=w.drop_duplicates(subset=need).reset_index(drop=True)
+    w['group']=range(1,len(w)+1); w['round']=round_no
+    if 'tee_time' not in w: w['tee_time']=''
+    if 'tee' not in w: w['tee']=''
+    return w[['group','tee_time','tee','player1','player2','player3','round']]
+
+def _parse_pgatour_tables(html, round_no):
+    """Parse PGA TOUR public tee-time HTML tables. Handles a Players cell containing 3 names."""
+    try: tabs=pd.read_html(StringIO(html))
+    except Exception: return pd.DataFrame()
+    for t in tabs:
+        cols={_norm(c):c for c in t.columns}
+        time_col=next((v for k,v in cols.items() if k=='time' or 'time' in k),None)
+        players_col=next((v for k,v in cols.items() if 'players' in k),None)
+        tee_col=next((v for k,v in cols.items() if k=='tee' or 'tee' in k),None)
+        if time_col is None or players_col is None: continue
+        rec=[]
+        for _,row in t.iterrows():
+            raw=str(row[players_col]).strip()
+            # PGA rendered tables often repeat country/name tokens; extract name-like chunks.
+            raw=re.sub(r'Image:[^A-Z]*',' ',raw)
+            raw=re.sub(r'\b(?:USA|JPN|CAN|ENG|AUS|KOR|RSA|SWE|DEN|NOR|IRL|SCO|ESP|FRA|GER|ARG|CHI|MEX|NZL|BEL|ITA|COL|TPE|CHN)\b',' ',raw)
+            names=[]
+            # Prefer separators if pandas preserved them.
+            for part in re.split(r'\s{2,}|\||;|\n',raw):
+                part=re.sub(r'\s+',' ',part).strip(' ,')
+                if re.match(r"^[A-Za-zÀ-ÖØ-öø-ÿ .’'\-]+$",part) and ' ' in part and 3<=len(part)<=55:
+                    if not names or _norm(part)!=_norm(names[-1]): names.append(part)
+            if len(names)!=3:
+                continue
+            rec.append({'tee_time':str(row[time_col]).strip(),'tee':str(row[tee_col]).strip() if tee_col else '',
+                        'player1':names[0],'player2':names[1],'player3':names[2]})
+        out=_validate_groups(pd.DataFrame(rec),round_no)
+        if not out.empty: return out
+    return pd.DataFrame()
+
 def fetch_groupings(tournament, year, round_no, source_url=""):
+    """PGA TOUR first; supplied URL and Golf Channel article are fallbacks."""
     urls=[]
+    # PGA TOUR public pages are primary. Search-derived/current tournament URLs can be pasted,
+    # while these stable public endpoints frequently expose the active tournament's rendered data.
+    urls.extend([
+        'https://www.pgatour.com/tournaments/pga/playerschamp/index/tee-times',
+        'https://www.pgatour.com/tournaments/pga/playerschamp/index',
+    ])
     if source_url.strip(): urls.append(source_url.strip())
     urls.append(golfchannel_round_url(tournament,year,round_no))
     errors=[]
     for u in dict.fromkeys(urls):
         try:
             html=fetch_text(u)
-            # First try HTML tables.
+            if 'pgatour.com' in u:
+                df=_parse_pgatour_tables(html,round_no)
+                if not df.empty: return df,u,f'PGA TOUR official table ({len(df)} groups)'
+            # Generic HTML tables, including user-pasted official tee-time pages.
             try:
                 tabs=pd.read_html(StringIO(html))
                 for t in tabs:
                     cols=[_norm(c) for c in t.columns]
                     if len(t.columns)>=4 and any('time' in c for c in cols):
-                        # Find rows containing three plausible player fields after time.
                         rec=[]
                         for _,row in t.iterrows():
                             vals=[str(v).strip() for v in row.tolist() if str(v).strip() not in ('','nan')]
                             if len(vals)>=4:
                                 names=vals[-3:]
-                                rec.append({"group":len(rec)+1,"tee_time":vals[0],"player1":names[0],"player2":names[1],"player3":names[2],"round":round_no})
-                        if rec: return pd.DataFrame(rec),u,"HTML table"
+                                rec.append({'tee_time':vals[0],'tee':'','player1':names[0],'player2':names[1],'player3':names[2]})
+                        df=_validate_groups(pd.DataFrame(rec),round_no)
+                        if not df.empty: return df,u,f'validated HTML table ({len(df)} groups)'
             except Exception: pass
-            df=parse_groupings_text(html,round_no)
-            if not df.empty: return df,u,"article text"
-            errors.append(f"No groupings parsed from {u}")
-        except Exception as e: errors.append(f"{u}: {e}")
-    return pd.DataFrame(),"","; ".join(errors[-2:])
+            df=_validate_groups(parse_groupings_text(html,round_no),round_no)
+            if not df.empty: return df,u,f'validated article text ({len(df)} groups)'
+            errors.append(f'No valid 3-player groups parsed from {u}')
+        except Exception as e: errors.append(f'{u}: {e}')
+    return pd.DataFrame(),'', '; '.join(errors[-3:])
 
 def normalize_groupings_upload(df, round_no):
     if df is None or df.empty: return pd.DataFrame()
