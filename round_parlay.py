@@ -204,16 +204,39 @@ def normalize_live_results(df):
         if c not in ('player',): w[c]=pd.to_numeric(w[c],errors='coerce')
     return w
 
-def build_round_ratings(otis, live_results, round_no):
+def _baycurrent_independent_fit(o):
+    """Independent Yokohama fit from available OTIS skill components.
+
+    Only course-specific components we actually have are used.  The researched
+    2026 DNA assigns 22 APP / 15 OTT / 5 ARG / 5 PUTT points to these inputs;
+    they are renormalized across the available 47 points rather than inventing
+    unavailable par-4, driving-distance, accuracy or bogey-avoidance data.
+    """
+    specs=[('otis_fit_app',22.0),('otis_fit_ott',15.0),('otis_fit_arg',5.0),('otis_fit_putt',5.0)]
+    num=pd.Series(0.0,index=o.index); den=pd.Series(0.0,index=o.index)
+    for col,w in specs:
+        if col not in o.columns: continue
+        x=pd.to_numeric(o[col],errors='coerce')
+        ok=x.notna()
+        num.loc[ok] += w*x.loc[ok]
+        den.loc[ok] += w
+    fallback=pd.to_numeric(o.get('otis_course_fit',50),errors='coerce').fillna(50)
+    return (num/den.replace(0,np.nan)).fillna(fallback).clip(1,99)
+
+def build_round_ratings(otis, live_results, round_no, tournament_name=''):
     """Round-specific latent strength. OTIS Rank/Model intentionally ignored."""
     o=otis.copy()
     if o.empty: return pd.DataFrame()
     o['key']=o['player'].map(_norm)
-    # OTIS percentiles: True Skill anchors; Course Fit/Form are bounded tilts.
+    # OTIS percentiles: True Skill anchors; course fit/form are bounded tilts.
     ts=pd.to_numeric(o.get('otis_true_skill',50),errors='coerce').fillna(50)
-    cf=pd.to_numeric(o.get('otis_course_fit',50),errors='coerce').fillna(50)
+    generic_cf=pd.to_numeric(o.get('otis_course_fit',50),errors='coerce').fillna(50)
+    is_baycurrent=('baycurrent' in str(tournament_name).casefold() or 'yokohama' in str(tournament_name).casefold())
+    cf=_baycurrent_independent_fit(o) if is_baycurrent else generic_cf
     fm=pd.to_numeric(o.get('otis_form',50),errors='coerce').fillna(50)
     pre=0.62*ts + 0.23*cf + 0.15*fm
+    o['course_fit_signal']=cf
+    o['course_fit_source']='Independent Yokohama DNA' if is_baycurrent else 'OTIS Course Fit'
     o['pre_round_rating']=pre.clip(1,99)
     o['live_form_adj']=0.0
     o['live_rounds']=0
@@ -245,7 +268,7 @@ def build_round_ratings(otis, live_results, round_no):
             o=o.drop(columns=['live_form_adj','live_rounds']).merge(live[['key','live_rounds','live_form_adj']],on='key',how='left')
             o['live_rounds']=o.live_rounds.fillna(0).astype(int); o['live_form_adj']=o.live_form_adj.fillna(0)
     o['round_rating']=(o.pre_round_rating+o.live_form_adj).clip(1,99)
-    return o[['player','key','pre_round_rating','live_form_adj','live_rounds','round_rating']]
+    return o[['player','key','pre_round_rating','course_fit_signal','course_fit_source','live_form_adj','live_rounds','round_rating']]
 
 def simulate_groups(groupings, ratings, n_sims=100000, seed=42, tie_band=0.22):
     rng=np.random.default_rng(seed); rmap=ratings.set_index('key').to_dict('index') if not ratings.empty else {}

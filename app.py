@@ -11,7 +11,7 @@ from round_parlay import fetch_groupings, normalize_groupings_upload, fetch_live
 
 ROOT = Path(__file__).resolve().parent
 st.set_page_config(page_title="PGA Predictor Pro", page_icon="⛳", layout="wide")
-st.title("⛳ PGA Predictor Pro — Unified Dashboard V10.9.0")
+st.title("⛳ PGA Predictor Pro — Unified Dashboard V10.9.1")
 st.caption("One setup page. Clean model pages. Transparent Course DNA.")
 
 @st.cache_data
@@ -288,7 +288,7 @@ page = st.sidebar.radio(
     ["🏠 Setup / Inputs", "🏆 Tournament DFS", "🎯 Round Parlays", "🧬 Course DNA", "📊 Results / Calibration"],
     index=0,
 )
-st.sidebar.caption("V10.9.0 • independent Course DNA + clean model pages")
+st.sidebar.caption("V10.9.1 • independent Course DNA feeds DFS + Round Parlays")
 
 
 def _course_dna(otis):
@@ -480,9 +480,17 @@ if page == "🏆 Tournament DFS":
         if st.button("Generate portfolio",type="primary"):
             settings=PortfolioSettings(lineup_count=int(lineup_count),salary_cap=50000,salary_floor=int(salary_floor),min_player_salary=int(min_player_salary),roster_size=6,max_exposure=float(max_exposure),min_unique=int(min_unique),strategy=strategy,seed=42)
             try:
-                portfolio,summary,exposure=optimize_portfolio(mc,settings,locks,excludes)
+                progress=st.progress(0,text="Preparing DFS optimizer…")
+                def _dfs_progress(frac,msg):
+                    progress.progress(min(1.0,max(0.0,float(frac))),text=msg)
+                portfolio,summary,exposure=optimize_portfolio(mc,settings,locks,excludes,progress_callback=_dfs_progress)
                 st.session_state.dfs_portfolio={"portfolio":portfolio,"summary":summary,"exposure":exposure}
-            except Exception as exc: st.error(str(exc))
+                progress.empty()
+                st.success(f"Generated {len(summary)} lineups.")
+            except Exception as exc:
+                try: progress.empty()
+                except Exception: pass
+                st.error(str(exc))
         po=st.session_state.get("dfs_portfolio")
         if po:
             st.dataframe(po["summary"],width="stretch",hide_index=True); st.dataframe(po["portfolio"],width="stretch",hide_index=True)
@@ -512,7 +520,7 @@ elif page == "🎯 Round Parlays":
                 with st.spinner("Pulling prior-round data..."): live,lnote=fetch_live_results(leaderboard_url,round_no)
         if groups.empty: st.error(f"Could not load validated groupings ({gnote}). Open the manual fallback only if needed.")
         else:
-            ratings=build_round_ratings(otis_fit,live,round_no); probs,_=simulate_groups(groups,ratings,n_sims=round_sims,seed=42); summary,legs=build_six_leg_tickets(probs,ticket_count=ticket_count,max_player_overlap=max_overlap)
+            ratings=build_round_ratings(otis_fit,live,round_no,tournament_name=tournament_name); probs,_=simulate_groups(groups,ratings,n_sims=round_sims,seed=42); summary,legs=build_six_leg_tickets(probs,ticket_count=ticket_count,max_player_overlap=max_overlap)
             st.session_state.round_parlay={"groups":groups,"ratings":ratings,"probs":probs,"summary":summary,"legs":legs,"gsrc":gsrc,"gnote":gnote,"lnote":lnote,"round":round_no}
     rp=st.session_state.get("round_parlay")
     if rp and rp.get("round")==round_no:
@@ -559,7 +567,7 @@ elif page == "🧬 Course DNA":
         st.subheader("Constructed model weights")
         st.dataframe(pillars,width="stretch",hide_index=True)
         st.bar_chart(pillars.set_index("Model input")["Weight %"])
-        st.caption("These weights are a pre-event 2026 Yokohama model thesis. They are not reverse-engineered from this week's results and they now feed the tournament prediction engine.")
+        st.caption("These weights are a pre-event 2026 Yokohama model thesis. They are not reverse-engineered from this week's results. The available APP/OTT/ARG/PUTT components are renormalized into an independent course-fit signal that feeds both Tournament DFS and Round Parlays; unavailable traits are never fabricated.")
 
         with st.expander("🔬 Evidence / Why",expanded=True):
             st.markdown("**Course structure:** 7,322-yard par 71; 13 par 4s, three par 3s and two par 5s. **Surfaces:** zoysia fairways/rough and creeping bentgrass greens. **2025 behavior:** fairways were comparatively easy to hit while GIR/scoring opportunities were harder to create. **Driving signal:** PGA TOUR's 2026 course-history review identified driving prowess as the clearest trait among many of last year's top-20 finishers. **Architecture:** fairway bunkers, doglegs and pinch points influence landing zones, while heavy bunkering protects many greens.")
@@ -594,4 +602,4 @@ else:
     st.info("As rounds finish, this page will compare predicted win/push/loss probabilities with actual 3-ball outcomes and tournament percentiles. We will evaluate calibration across events rather than tune to one result.")
 
 st.divider()
-st.caption("V10.9.0 Unified PGA Dashboard — independent researched Course DNA added for the 2026 Baycurrent Classic. V10.7.2 official PGA TOUR TeeTimes API, V10.6.6b tournament model, Course-Fit methodology, round simulation, and parlay methodology are preserved. Course DNA adds a transparent reconstruction/audit view from the visible weekly Course-Fit components; it does not invent unavailable granular inputs.")
+st.caption("V10.9.1 Unified PGA Dashboard — independent researched Course DNA now feeds both Tournament DFS and Round Parlays for the 2026 Baycurrent Classic. V10.7.2 official PGA TOUR TeeTimes API, V10.6.6b tournament model, Course-Fit methodology, round simulation, and parlay methodology are preserved. Course DNA adds a transparent reconstruction/audit view from the visible weekly Course-Fit components; it does not invent unavailable granular inputs.")

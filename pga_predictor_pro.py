@@ -1381,7 +1381,28 @@ def build_features(
     if "otis_true_skill" in p.columns:
         true_skill = pd.to_numeric(p["otis_true_skill"], errors="coerce")
         form = pd.to_numeric(p.get("otis_form", pd.Series(np.nan, index=p.index)), errors="coerce")
-        fit = pd.to_numeric(p.get("otis_course_fit", pd.Series(np.nan, index=p.index)), errors="coerce")
+        generic_fit = pd.to_numeric(p.get("otis_course_fit", pd.Series(np.nan, index=p.index)), errors="coerce")
+        # V10.9.1: for Baycurrent/Yokohama, replace the generic weekly Course Fit
+        # with the independent researched DNA signal using only components that
+        # are actually present.  22 APP / 15 OTT / 5 ARG / 5 PUTT are
+        # renormalized across available inputs; no missing course traits are invented.
+        if dna.get("research_profile") == "baycurrent_2026":
+            dna_specs = [("otis_fit_app",22.0),("otis_fit_ott",15.0),("otis_fit_arg",5.0),("otis_fit_putt",5.0)]
+            dna_num = pd.Series(0.0, index=p.index)
+            dna_den = pd.Series(0.0, index=p.index)
+            for dna_col, dna_w in dna_specs:
+                if dna_col not in p.columns:
+                    continue
+                dna_x = pd.to_numeric(p[dna_col], errors="coerce")
+                dna_ok = dna_x.notna()
+                dna_num.loc[dna_ok] += dna_w * dna_x.loc[dna_ok]
+                dna_den.loc[dna_ok] += dna_w
+            fit = (dna_num / dna_den.replace(0, np.nan)).fillna(generic_fit)
+            p["course_fit_source"] = "Independent Yokohama DNA"
+        else:
+            fit = generic_fit
+            p["course_fit_source"] = "OTIS Course Fit"
+        p["independent_course_fit"] = fit
         form_rds = pd.to_numeric(p.get("otis_form_rds", pd.Series(np.nan, index=p.index)), errors="coerce")
         venue_rds = pd.to_numeric(p.get("otis_venue_rds", pd.Series(np.nan, index=p.index)), errors="coerce")
 

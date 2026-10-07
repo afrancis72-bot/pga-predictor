@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+from typing import Iterable, Sequence, Callable
 import numpy as np
 import pandas as pd
 
@@ -17,7 +17,9 @@ class PortfolioSettings:
     min_unique: int = 3
     strategy: str = "GPP Ceiling"
     candidate_pool_size: int = 60
-    candidate_samples: int = 120000
+    candidate_samples: int = 45000
+    target_candidates: int = 3500
+    batch_size: int = 2500
     seed: int = 42
 
 
@@ -69,6 +71,7 @@ def optimize_portfolio(
     settings: PortfolioSettings | None = None,
     locks: Sequence[str] | None = None,
     excludes: Sequence[str] | None = None,
+    progress_callback: Callable[[float, str], None] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     settings = settings or PortfolioSettings()
     locks, excludes = set(locks or []), set(excludes or [])
@@ -94,33 +97,71 @@ def optimize_portfolio(
 
     rng = np.random.default_rng(settings.seed)
     values = pool[obj].to_numpy(float)
-    locked_idx = set(pool.index[pool.player.isin(locks)])
+    salaries = pool["salary"].to_numpy(int)
+    players_arr = pool["player"].astype(str).to_numpy()
+    locked_idx = np.array(pool.index[pool.player.isin(locks)], dtype=int)
+    locked_set = set(locked_idx.tolist())
     need = settings.roster_size - len(locked_idx)
-    selectable = np.array([i for i in range(len(pool)) if i not in locked_idx])
+    selectable = np.array([i for i in range(len(pool)) if i not in locked_set], dtype=int)
     candidates: dict[frozenset[str], tuple[float, int]] = {}
-    # Multiple sampling temperatures create both ceiling lineups and enough
-    # diversified alternatives to satisfy portfolio-wide exposure constraints.
+
+    if need < 0 or need > len(selectable):
+        raise RuntimeError("Not enough eligible golfers to complete a lineup.")
+
+    # Fast batched weighted-without-replacement generation.  Gumbel top-k gives
+    # the same useful bias toward high-objective golfers as repeated weighted
+    # choice, but evaluates thousands of candidate lineups per NumPy batch.
     temps = (1.10, 1.80, 3.00)
-    draws_per_temp = max(20000, settings.candidate_samples // len(temps))
-    for temp in temps:
-        probs = np.exp((values - np.nanmax(values)) / temp)
-        probs = probs / probs.sum()
-        selectable_probs = probs[selectable]
-        selectable_probs = selectable_probs / selectable_probs.sum()
-        for _ in range(draws_per_temp):
-            if need:
-                pick = rng.choice(selectable, need, replace=False, p=selectable_probs)
-                idx = list(locked_idx) + list(pick)
-            else:
-                idx = list(locked_idx)
-            lu = pool.iloc[idx]
-            salary = int(lu.salary.sum())
-            if settings.salary_floor <= salary <= settings.salary_cap:
-                names = frozenset(lu.player.astype(str))
-                score = float(lu[obj].sum()) + 0.000010*(salary-settings.salary_floor)
-                old = candidates.get(names)
-                if old is None or score > old[0]:
-                    candidates[names] = (score, salary)
+    total_budget = max(9000, int(settings.candidate_samples))
+    per_temp_budget = max(3000, total_budget // len(temps))
+    batch_size = max(250, int(settings.batch_size))
+    target = max(settings.lineup_count * 180, int(settings.target_candidates))
+    processed = 0
+
+    if progress_callback:
+        progress_callback(0.03, "Preparing DFS candidate pool…")
+
+    locked_salary = int(salaries[locked_idx].sum()) if len(locked_idx) else 0
+    locked_score = float(values[locked_idx].sum()) if len(locked_idx) else 0.0
+
+    if need == 0:
+        salary = locked_salary
+        if settings.salary_floor <= salary <= settings.salary_cap:
+            names = frozenset(players_arr[locked_idx])
+            candidates[names] = (locked_score + 0.000010*(salary-settings.salary_floor), salary)
+    else:
+        base_values = values[selectable]
+        for t_i, temp in enumerate(temps):
+            logw = (base_values - np.nanmax(base_values)) / temp
+            temp_done = 0
+            while temp_done < per_temp_budget:
+                n = min(batch_size, per_temp_budget - temp_done)
+                # Gumbel perturbation + top-k = weighted sampling without replacement.
+                g = rng.gumbel(size=(n, len(selectable)))
+                keys = logw[None, :] + g
+                local = np.argpartition(keys, -need, axis=1)[:, -need:]
+                picks = selectable[local]
+                batch_salary = salaries[picks].sum(axis=1) + locked_salary
+                valid = (batch_salary >= settings.salary_floor) & (batch_salary <= settings.salary_cap)
+                for row, salary in zip(picks[valid], batch_salary[valid]):
+                    idx = np.concatenate((locked_idx, row))
+                    names = frozenset(players_arr[idx])
+                    score = float(values[idx].sum()) + 0.000010*(int(salary)-settings.salary_floor)
+                    old = candidates.get(names)
+                    if old is None or score > old[0]:
+                        candidates[names] = (score, int(salary))
+                temp_done += n
+                processed += n
+                if progress_callback:
+                    frac = min(0.82, 0.05 + 0.77 * processed / max(1, total_budget))
+                    progress_callback(frac, f"Building candidate lineups… {len(candidates):,} valid")
+                # Once we have a deep diversified pool, extra random draws add
+                # little lineup quality but can add substantial wait time.
+                if len(candidates) >= target and temp_done >= min(5000, per_temp_budget):
+                    break
+
+    if progress_callback:
+        progress_callback(0.86, f"Selecting {settings.lineup_count} portfolio lineups…")
 
     ranked = sorted([(v[0], v[1], k) for k, v in candidates.items()], reverse=True)
     if not ranked:
@@ -178,4 +219,6 @@ def optimize_portfolio(
     summary = pd.DataFrame(summaries)
     expo = portfolio.groupby("player").size().sort_values(ascending=False).rename("lineups").reset_index()
     expo["exposure_pct"] = 100 * expo.lineups / settings.lineup_count
+    if progress_callback:
+        progress_callback(1.0, "DFS portfolio complete.")
     return portfolio, summary, expo
