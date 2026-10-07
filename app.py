@@ -11,7 +11,7 @@ from round_parlay import fetch_groupings, normalize_groupings_upload, fetch_live
 
 ROOT = Path(__file__).resolve().parent
 st.set_page_config(page_title="PGA Predictor Pro", page_icon="⛳", layout="wide")
-st.title("⛳ PGA Predictor Pro — Unified Dashboard V10.8.0")
+st.title("⛳ PGA Predictor Pro — Unified Dashboard V10.9.0")
 st.caption("One setup page. Clean model pages. Transparent Course DNA.")
 
 @st.cache_data
@@ -288,7 +288,7 @@ page = st.sidebar.radio(
     ["🏠 Setup / Inputs", "🏆 Tournament DFS", "🎯 Round Parlays", "🧬 Course DNA", "📊 Results / Calibration"],
     index=0,
 )
-st.sidebar.caption("V10.8.0 • inputs live on Setup; model pages stay clean")
+st.sidebar.caption("V10.9.0 • independent Course DNA + clean model pages")
 
 
 def _course_dna(otis):
@@ -530,27 +530,55 @@ elif page == "🎯 Round Parlays":
 
 elif page == "🧬 Course DNA":
     st.header("🧬 Course DNA")
-    st.caption("What does our weekly model think this course is asking golfers to do?")
-    dna,note=_course_dna(otis_fit)
-    st.subheader(f"{course_query} — Model Thesis")
-    st.info(_dna_thesis(dna,course_query))
-    if dna.empty:
-        st.warning(note)
+    st.caption("What does our independent pre-event model think this course is asking golfers to do?")
+
+    is_baycurrent = "baycurrent" in str(tournament_name).casefold() or "yokohama" in str(course_query).casefold()
+    if is_baycurrent:
+        st.subheader(f"{course_query} — Independent 2026 Model Thesis")
+        st.info("Yokohama is primarily a **ball-striking test**: create greens/scoring chances with strong approach play, pair that with quality driving, and survive an unusually par-4-heavy routing. Short game and bentgrass putting matter, but they are secondary rather than the engine of the model.")
+
+        pillars = pd.DataFrame([
+            {"Model input":"SG: Approach","Weight %":22.0,"Demand":"PRIMARY","Why":"13 par 4s plus a 2025 profile where fairways were relatively easy to find but GIR/scoring opportunities were harder to create."},
+            {"Model input":"SG: Off the Tee","Weight %":15.0,"Demand":"HIGH","Why":"2025 top finishers showed a meaningful driving signal; the layout rewards usable power and positioning around bunkers, doglegs and pinch points."},
+            {"Model input":"Overall skill / SG Total","Weight %":14.0,"Demand":"HIGH","Why":"Keeps the course model anchored to complete golfer quality instead of overfitting one course trait."},
+            {"Model input":"Par-4 scoring","Weight %":9.0,"Demand":"HIGH","Why":"Yokohama has 13 par 4s — an unusually large share of every round."},
+            {"Model input":"Driving distance","Weight %":8.0,"Demand":"MODERATE-HIGH","Why":"Wide-ish fairways and manageable rough permit aggression, while 7,322 yards still rewards useful length."},
+            {"Model input":"Bogey avoidance","Weight %":8.0,"Demand":"MODERATE-HIGH","Why":"Missed greens plus heavily bunkered complexes create recovery pressure."},
+            {"Model input":"Driving accuracy","Weight %":5.0,"Demand":"MODERATE","Why":"Position still matters around landing-zone hazards, but pure accuracy is not treated as the dominant driving trait."},
+            {"Model input":"Birdie rate","Weight %":5.0,"Demand":"MODERATE","Why":"When players create chances, the course is gettable; conversion and scoring remain relevant."},
+            {"Model input":"SG: Around Green","Weight %":5.0,"Demand":"SECONDARY","Why":"Bunkering and green complexes punish misses, but recovery skill is not allowed to outrank ball striking."},
+            {"Model input":"SG: Putting","Weight %":5.0,"Demand":"SECONDARY","Why":"Creeping bentgrass matters, but volatile putting is deliberately prevented from dominating the pre-event model."},
+            {"Model input":"Par-3 scoring","Weight %":2.0,"Demand":"LOW","Why":"Only three par 3s per round."},
+            {"Model input":"Par-5 scoring","Weight %":2.0,"Demand":"LOW","Why":"Only two par 5s per round, so there are fewer opportunities for this skill to separate the field."},
+        ])
+        c1,c2,c3,c4=st.columns(4)
+        c1.metric("Primary demand","Approach / GIR")
+        c2.metric("Secondary demand","Off the Tee")
+        c3.metric("Par 4s","13 of 18")
+        c4.metric("Greens","Bentgrass")
+        st.subheader("Constructed model weights")
+        st.dataframe(pillars,width="stretch",hide_index=True)
+        st.bar_chart(pillars.set_index("Model input")["Weight %"])
+        st.caption("These weights are a pre-event 2026 Yokohama model thesis. They are not reverse-engineered from this week's results and they now feed the tournament prediction engine.")
+
+        with st.expander("🔬 Evidence / Why",expanded=True):
+            st.markdown("**Course structure:** 7,322-yard par 71; 13 par 4s, three par 3s and two par 5s. **Surfaces:** zoysia fairways/rough and creeping bentgrass greens. **2025 behavior:** fairways were comparatively easy to hit while GIR/scoring opportunities were harder to create. **Driving signal:** PGA TOUR's 2026 course-history review identified driving prowess as the clearest trait among many of last year's top-20 finishers. **Architecture:** fairway bunkers, doglegs and pinch points influence landing zones, while heavy bunkering protects many greens.")
+            st.warning("Guardrail: we do not yet have defensible hole-by-hole approach-distance frequencies for this 2026 routing, so the model does **not** invent 100–125 / 125–150 / 150–175 / 175–200 / 200+ weights. Those remain a future granular layer.")
+
+        with st.expander("🌬️ Round conditions are separate",expanded=False):
+            st.write("Weather does not change the permanent Course DNA. Wind and other round conditions are applied in the round/tournament environment layer so a windy Friday can play differently from a calmer Thursday without rewriting what Yokohama fundamentally demands.")
     else:
-        m1,m2,m3=st.columns(3); m1.metric("Primary demand",dna.iloc[0]["Requirement"]); m2.metric("Primary emphasis",f"{dna.iloc[0]['Constructed weight %']:.1f}%"); m3.metric("Components",len(dna))
-        st.subheader("Constructed Course DNA")
-        st.dataframe(dna,width="stretch",hide_index=True)
-        st.bar_chart(dna.set_index("Requirement")["Constructed weight %"])
-        st.caption(note)
-        st.warning("Interpretation guardrail: these weights are reconstructed from the visible OTIS weekly Course-Fit components across this field. They are an audit of the model layer, not hidden OTIS source weights and not yet distance-bucket or green-surface DNA.")
-    with st.expander("🔬 Model Construction / Why",expanded=True):
-        st.markdown("**Baseline:** OTIS True Skill establishes golfer strength. **Weekly fit:** Course Fit is the bounded course-specific tilt. **Form:** recent form is reliability-shrunk using Form Rds. **Course DNA audit:** standardized APP/OTT/ARG/PUTT/History component scores are used to reconstruct which visible components most explain this week's Course Fit variation. OTIS Rank and OTIS Model are audit-only and are not predictive inputs.")
-        if not dna.empty:
-            reasons=[]
-            for _,r in dna.iterrows(): reasons.append({"Requirement":r["Requirement"],"Why it matters in this weekly model":f"{r['Emphasis']} reconstructed emphasis; {r['Constructed weight %']:.1f}% of visible component weight."})
-            st.dataframe(pd.DataFrame(reasons),width="stretch",hide_index=True)
-    with st.expander("Future granular Course DNA",expanded=False):
-        st.write("The next data layer can add approach distance buckets (<100, 100–125, 125–150, 150–175, 175–200, 200+), driving distance vs accuracy/positioning, green-surface putting splits, par-type scoring, comparable-course history, and round-specific weather/wave effects. V10.8 does not invent these when the weekly inputs do not contain them.")
+        dna,note=_course_dna(otis_fit)
+        st.subheader(f"{course_query} — Model Thesis")
+        st.info(_dna_thesis(dna,course_query))
+        if dna.empty:
+            st.warning(note)
+        else:
+            st.dataframe(dna,width="stretch",hide_index=True)
+            st.bar_chart(dna.set_index("Requirement")["Constructed weight %"])
+            st.caption(note)
+        with st.expander("🔬 Model Construction / Why",expanded=True):
+            st.write("For courses without a researched independent profile, this page falls back to the visible weekly Course-Fit audit. It does not invent unavailable course characteristics.")
 
 else:
     st.header("📊 Results / Calibration")
@@ -566,4 +594,4 @@ else:
     st.info("As rounds finish, this page will compare predicted win/push/loss probabilities with actual 3-ball outcomes and tournament percentiles. We will evaluate calibration across events rather than tune to one result.")
 
 st.divider()
-st.caption("V10.8.0 Unified PGA Dashboard — navigation/UI redesign only. V10.7.2 official PGA TOUR TeeTimes API, V10.6.6b tournament model, Course-Fit methodology, round simulation, and parlay methodology are preserved. Course DNA adds a transparent reconstruction/audit view from the visible weekly Course-Fit components; it does not invent unavailable granular inputs.")
+st.caption("V10.9.0 Unified PGA Dashboard — independent researched Course DNA added for the 2026 Baycurrent Classic. V10.7.2 official PGA TOUR TeeTimes API, V10.6.6b tournament model, Course-Fit methodology, round simulation, and parlay methodology are preserved. Course DNA adds a transparent reconstruction/audit view from the visible weekly Course-Fit components; it does not invent unavailable granular inputs.")

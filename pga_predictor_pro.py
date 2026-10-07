@@ -514,6 +514,26 @@ def course_dna(
     tournament: str
 ) -> Dict[str, float]:
 
+    # V10.9: researched, pre-event Course DNA for the 2026 Baycurrent Classic.
+    # This profile is intentionally based on course/setup evidence rather than
+    # fitting to 2026 outcomes.  Weather remains a separate round adjustment.
+    tkey = str(tournament or "").casefold()
+    if "baycurrent" in tkey:
+        return {
+            "length": 0.62,
+            "narrow": 0.38,
+            "rough": 0.42,
+            "water": 0.28,
+            "bunker": 0.72,
+            "green_small": 0.60,
+            "wind_exposure": 0.50,
+            "elevation": 0.35,
+            "par3": 3.0 / 18.0,
+            "par4": 13.0 / 18.0,
+            "par5": 2.0 / 18.0,
+            "research_profile": "baycurrent_2026",
+        }
+
     if holes.empty:
 
         return {
@@ -691,6 +711,25 @@ def course_dna(
 def course_stat_weights(
     dna: Dict[str, float]
 ) -> Dict[str, float]:
+
+    # Independent 2026 Yokohama thesis: approach/GIR creation and OTT quality
+    # are the dominant pillars; 13 par 4s elevate par-4 scoring and bogey
+    # avoidance. ARG and bentgrass putting matter, but remain secondary.
+    if dna.get("research_profile") == "baycurrent_2026":
+        return {
+            "sg_total": 0.14,
+            "sg_approach": 0.22,
+            "sg_ott": 0.15,
+            "sg_arg": 0.05,
+            "sg_putting": 0.05,
+            "driving_accuracy": 0.05,
+            "driving_distance": 0.08,
+            "birdie_rate": 0.05,
+            "bogey_avoidance": 0.08,
+            "par3": 0.02,
+            "par4": 0.09,
+            "par5": 0.02,
+        }
 
     weights = (
         DEFAULT_STAT_WEIGHTS.copy()
