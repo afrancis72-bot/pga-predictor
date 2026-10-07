@@ -11,8 +11,8 @@ from round_parlay import fetch_groupings, normalize_groupings_upload, fetch_live
 
 ROOT = Path(__file__).resolve().parent
 st.set_page_config(page_title="PGA Predictor Pro", page_icon="⛳", layout="wide")
-st.title("⛳ PGA Predictor Pro — Tournament Model V10.7.0")
-st.caption("$0 course/weather ingestion + DraftKings field + OTIS Advanced Course-Fit player layer")
+st.title("⛳ PGA Predictor Pro — Unified Dashboard V10.8.0")
+st.caption("One setup page. Clean model pages. Transparent Course DNA.")
 
 @st.cache_data
 def load_repo_csv(name):
@@ -275,335 +275,295 @@ def cached_weather_gca(course_id, tournament, start_date, api_key):
 def cached_weather_location(lat, lon, tournament, start_date):
     return fetch_weather({"latitude": lat, "longitude": lon}, tournament, start_date=start_date, days=7)
 
-st.sidebar.header("Tournament Setup")
-tournament_name = st.sidebar.text_input("Tournament", placeholder="Current tournament")
-course_query = st.sidebar.text_input("Course", placeholder="Current course")
-tournament_start = st.sidebar.date_input("Tournament-week weather start", value=date.today())
 
-st.sidebar.subheader("DraftKings")
-players_up = st.sidebar.file_uploader("DraftKings field / players.csv (required)", type="csv", key="players")
+# ---------------- V10.8 unified navigation ----------------
+if "pga_bundle" not in st.session_state:
+    st.session_state.pga_bundle = None
+if "prediction" not in st.session_state:
+    st.session_state.prediction = None
+    st.session_state.prediction_key = None
 
-st.sidebar.subheader("$0 internet ingestion")
-st.sidebar.caption("Course/scorecard: Golf Courses API when available. Global location fallback: OpenStreetMap/Nominatim. Weather: Open-Meteo. No PGA TOUR scraping is used.")
-gca_key = st.sidebar.text_input("Golf Courses API key (optional)", type="password", help="Optional richer scorecard source. If blank or no match is found, the app uses the global OpenStreetMap location fallback.")
-country_hint = st.sidebar.text_input("Country / region hint (recommended)", placeholder="Japan, Bermuda, Mexico...")
-if "course_matches" not in st.session_state: st.session_state.course_matches = []
-if "selected_course_id" not in st.session_state: st.session_state.selected_course_id = None
-if "course_lookup_note" not in st.session_state: st.session_state.course_lookup_note = ""
-if st.sidebar.button("Find course online"):
-    st.session_state.selected_course_id = None
-    st.session_state.course_matches = []
-    st.session_state.course_lookup_note = ""
-    try:
-        gca_matches = cached_course_search(course_query, gca_key, country_hint) if gca_key.strip() else []
-        for r in gca_matches: r["source"] = "Golf Courses API"
-        if gca_matches:
-            st.session_state.course_matches = gca_matches
-            st.session_state.course_lookup_note = "Rich course database match found."
-        else:
-            osm_matches = cached_osm_search(course_query, country_hint)
-            st.session_state.course_matches = osm_matches
-            st.session_state.course_lookup_note = (
-                "Golf Courses API had no match; global OpenStreetMap location fallback used." if gca_key.strip()
-                else "Global OpenStreetMap location lookup used."
-            )
-            if not osm_matches:
-                st.session_state.course_lookup_note = "No match after course database + automatic global alias/location search."
-    except Exception as exc:
-        st.session_state.course_lookup_note = f"Lookup failed: {exc}"
+page = st.sidebar.radio(
+    "PGA MODEL",
+    ["🏠 Setup / Inputs", "🏆 Tournament DFS", "🎯 Round Parlays", "🧬 Course DNA", "📊 Results / Calibration"],
+    index=0,
+)
+st.sidebar.caption("V10.8.0 • inputs live on Setup; model pages stay clean")
 
-if st.session_state.course_lookup_note:
-    (st.sidebar.warning if "no match" in st.session_state.course_lookup_note.casefold() or "failed" in st.session_state.course_lookup_note.casefold() else st.sidebar.info)(st.session_state.course_lookup_note)
 
-selected_course = None
-if st.session_state.course_matches:
-    labels = [f"[{r.get('source','Course source')}] {r['name']} — {r['city']}, {r['state']}, {r['country']}".strip(" —,") for r in st.session_state.course_matches]
-    choice = st.sidebar.selectbox("Matched course/location", range(len(labels)), format_func=lambda i: labels[i])
-    selected_course = st.session_state.course_matches[choice]
-    st.session_state.selected_course_id = selected_course["id"]
-    st.sidebar.success(f"Course identity ready via {selected_course.get('source','online source')}")
+def _course_dna(otis):
+    """Reconstruct relative component emphasis from the weekly OTIS Course-Fit layer.
+    This is an audit view, not a claim that the app knows hidden OTIS internals.
+    """
+    if otis is None or otis.empty or "otis_course_fit" not in otis.columns:
+        return pd.DataFrame(), "Course-Fit data unavailable."
+    labels = {
+        "otis_fit_app":"Approach", "otis_fit_ott":"Off the Tee", "otis_fit_arg":"Around Green",
+        "otis_fit_putt":"Putting", "otis_fit_history":"Venue / History"
+    }
+    cols=[c for c in labels if c in otis.columns and pd.to_numeric(otis[c],errors="coerce").notna().sum()>=8]
+    if not cols:
+        return pd.DataFrame(), "Advanced APP/OTT/ARG/PUTT/History component columns are not present."
+    d=otis[["otis_course_fit"]+cols].apply(pd.to_numeric,errors="coerce").dropna()
+    if len(d)<8:
+        return pd.DataFrame(), "Not enough complete component rows to construct Course DNA."
+    # Standardized least-squares reconstruction of overall Course Fit from its visible components.
+    y=(d["otis_course_fit"]-d["otis_course_fit"].mean())/(d["otis_course_fit"].std(ddof=0) or 1)
+    X=[]
+    for c in cols:
+        x=d[c]; X.append(((x-x.mean())/(x.std(ddof=0) or 1)).to_numpy())
+    import numpy as np
+    A=np.column_stack(X)
+    coef=np.linalg.lstsq(A,y.to_numpy(),rcond=None)[0]
+    pred=A@coef
+    ssr=float(((y.to_numpy()-pred)**2).sum()); sst=float(((y.to_numpy()-y.mean())**2).sum())
+    r2=max(0.0,1-ssr/sst) if sst>0 else 0.0
+    pos=np.clip(coef,0,None)
+    weights=(pos/pos.sum()*100) if pos.sum()>0 else (np.abs(coef)/np.abs(coef).sum()*100)
+    rows=[]
+    for c,b,w in zip(cols,coef,weights):
+        level="HIGH" if w>=25 else ("MODERATE" if w>=15 else "LOW")
+        rows.append({"Requirement":labels[c],"Constructed weight %":round(float(w),1),"Standardized influence":round(float(b),3),"Emphasis":level})
+    out=pd.DataFrame(rows).sort_values("Constructed weight %",ascending=False).reset_index(drop=True)
+    return out, f"Visible components explain {r2:.0%} of weekly Course Fit variation across {len(d)} golfers."
 
-st.sidebar.subheader("OTIS Golf data")
-st.sidebar.caption("Upload the weekly OTIS Course-Fit CSV exported from Model → Course fit → Advanced. The app uses True Skill, Course Fit and Form; OTIS Rank/Model are audit-only and never drive projections.")
-otis_fit_up = st.sidebar.file_uploader("OTIS — Advanced Course-Fit CSV", type="csv", key="otis_fit")
 
-st.sidebar.subheader("Advanced model inputs")
-st.sidebar.caption("Optional direct overrides. Use these only if you already have model-contract CSVs.")
-stats_up = st.sidebar.file_uploader("player_stats.csv override", type="csv", key="stats")
-results_up = st.sidebar.file_uploader("results.csv override", type="csv", key="results")
-history_up = st.sidebar.file_uploader("course_history.csv override", type="csv", key="history")
-holes_up = st.sidebar.file_uploader("course_holes.csv (overrides online course)", type="csv", key="holes")
-weather_up = st.sidebar.file_uploader("weather.csv (overrides Open-Meteo)", type="csv", key="weather")
+def _dna_thesis(dna, course):
+    if dna.empty:
+        return "The current weekly file does not expose enough component detail to construct a defensible course thesis."
+    top=dna.iloc[0]
+    second=dna.iloc[1] if len(dna)>1 else None
+    low=dna.iloc[-1]
+    txt=f"For **{course or 'this course'}**, the weekly Course-Fit layer is asking most strongly for **{top['Requirement']}** ({top['Constructed weight %']:.1f}% of reconstructed emphasis)."
+    if second is not None:
+        txt+=f" **{second['Requirement']}** is the secondary demand ({second['Constructed weight %']:.1f}%)."
+    txt+=f" **{low['Requirement']}** carries the least reconstructed emphasis ({low['Constructed weight %']:.1f}%)."
+    return txt
 
-if not tournament_name.strip() or not course_query.strip():
-    st.info("Enter the current tournament and course in the sidebar.")
-    st.stop()
 
-players_raw = load_weekly(players_up, "players.csv")
-players, dk_format = normalize_dk_players(players_raw)
-# Advanced-data precedence:
-# explicit model-contract override > OTIS weekly Course-Fit export > repository fallback.
-otis_fit_raw = pd.read_csv(otis_fit_up) if otis_fit_up is not None else pd.DataFrame()
-otis_fit, otis_fit_status = normalize_otis_course_fit(otis_fit_raw)
+if page == "🏠 Setup / Inputs":
+    st.header("🏠 Setup / Inputs")
+    st.caption("Load the tournament once. The other pages use this shared setup and do not ask you to upload the same files again.")
+    prev=st.session_state.pga_bundle or {}
+    a,b,c=st.columns([1.3,1.3,1])
+    tournament_name=a.text_input("Tournament",value=prev.get("tournament_name", ""),placeholder="Current tournament")
+    course_query=b.text_input("Course",value=prev.get("course_query", ""),placeholder="Current course")
+    tournament_start=c.date_input("Tournament-week start",value=prev.get("tournament_start",date.today()))
 
-if stats_up is not None:
-    player_stats_raw = pd.read_csv(stats_up)
-    player_stats, stats_status = validate_advanced_input(player_stats_raw, "player_stats")
-elif not otis_fit.empty:
-    player_stats, stats_status = otis_fit, otis_fit_status
-else:
-    player_stats_raw = load_repo_csv("player_stats.csv")
-    player_stats, stats_status = validate_advanced_input(player_stats_raw, "player_stats")
+    st.subheader("Required weekly files")
+    u1,u2=st.columns(2)
+    players_up=u1.file_uploader("DraftKings PGA salary / field CSV",type="csv",key="setup_players")
+    otis_fit_up=u2.file_uploader("OTIS — Advanced Course-Fit CSV",type="csv",key="setup_otis")
 
-if results_up is not None:
-    results_raw = pd.read_csv(results_up)
-    results, results_status = validate_advanced_input(results_raw, "results")
-else:
-    results_raw = load_repo_csv("results.csv")
-    results, results_status = validate_advanced_input(results_raw, "results")
-
-if history_up is not None:
-    history_raw = pd.read_csv(history_up)
-    history, history_status = validate_advanced_input(history_raw, "course_history")
-else:
-    history_raw = load_repo_csv("course_history.csv")
-    history, history_status = validate_advanced_input(history_raw, "course_history")
-
-# Invalid repository fallbacks are deliberately treated as absent. An explicit
-# upload with a bad schema is still surfaced to the user below.
-
-# Course holes: explicit upload > selected open source > repository fallback.
-if holes_up is not None:
-    holes = pd.read_csv(holes_up); holes_source = "uploaded"
-elif selected_course is not None:
-    if selected_course.get("source") == "Golf Courses API":
+    st.subheader("Automatic course & weather")
+    c1,c2,c3=st.columns([1,1,1])
+    country_hint=c1.text_input("Country / region hint",value=prev.get("country_hint",""),placeholder="Japan, Florida, Mexico...")
+    gca_key=c2.text_input("Golf Courses API key (optional)",type="password")
+    find_course=c3.button("Find / refresh course",use_container_width=True)
+    if "course_matches" not in st.session_state: st.session_state.course_matches=[]
+    if "selected_course_id" not in st.session_state: st.session_state.selected_course_id=None
+    if "course_lookup_note" not in st.session_state: st.session_state.course_lookup_note=""
+    if find_course and course_query.strip():
         try:
-            holes, selected_detail = cached_course_holes(st.session_state.selected_course_id, tournament_name, gca_key)
-            holes_source = "Golf Courses API" if not holes.empty else "course identified; scorecard/holes unavailable"
+            gca_matches=cached_course_search(course_query,gca_key,country_hint) if gca_key.strip() else []
+            for r in gca_matches: r["source"]="Golf Courses API"
+            if gca_matches:
+                st.session_state.course_matches=gca_matches; st.session_state.course_lookup_note="Rich course database match found."
+            else:
+                osm_matches=cached_osm_search(course_query,country_hint)
+                st.session_state.course_matches=osm_matches
+                st.session_state.course_lookup_note="Global OpenStreetMap location lookup used." if osm_matches else "No automatic course/location match found."
         except Exception as exc:
-            holes = pd.DataFrame(); holes_source = f"course identified; scorecard failed: {exc}"
-    else:
-        holes = pd.DataFrame(); holes_source = "location verified; scorecard/holes unavailable"
-else:
-    holes = load_repo_csv("course_holes.csv"); holes_source = "repository fallback" if not holes.empty else "not supplied"
+            st.session_state.course_matches=[]; st.session_state.course_lookup_note=f"Lookup failed: {exc}"
+    if st.session_state.course_lookup_note:
+        st.info(st.session_state.course_lookup_note)
+    selected_course=None
+    if st.session_state.course_matches:
+        labels=[f"[{r.get('source','source')}] {r['name']} — {r.get('city','')}, {r.get('state','')}, {r.get('country','')}" for r in st.session_state.course_matches]
+        choice=st.selectbox("Matched course/location",range(len(labels)),format_func=lambda i:labels[i])
+        selected_course=st.session_state.course_matches[choice]
+        st.session_state.selected_course_id=selected_course["id"]
 
-# Weather: explicit upload > selected open source > repository fallback.
-if weather_up is not None:
-    weather = pd.read_csv(weather_up); weather_source = "uploaded"
-elif selected_course is not None:
-    try:
-        if selected_course.get("source") == "Golf Courses API":
-            weather = cached_weather_gca(st.session_state.selected_course_id, tournament_name, tournament_start, gca_key)
+    with st.expander("⚙️ Advanced / Manual Data Overrides",expanded=False):
+        st.caption("Normally leave these alone. They are fallbacks for missing or custom data.")
+        stats_up=st.file_uploader("player_stats.csv override",type="csv",key="setup_stats")
+        results_up=st.file_uploader("results.csv override",type="csv",key="setup_results")
+        history_up=st.file_uploader("course_history.csv override",type="csv",key="setup_history")
+        holes_up=st.file_uploader("course_holes.csv override",type="csv",key="setup_holes")
+        weather_up=st.file_uploader("weather.csv override",type="csv",key="setup_weather")
+
+    sims=st.selectbox("Tournament simulations",[25000,50000,100000],index=1)
+    if st.button("Load inputs & build tournament model",type="primary",use_container_width=True):
+        if not tournament_name.strip() or not course_query.strip():
+            st.error("Enter the tournament and course.")
+        elif players_up is None or otis_fit_up is None:
+            st.error("Upload the DraftKings field and OTIS Advanced Course-Fit CSV.")
         else:
-            weather = cached_weather_location(float(selected_course["latitude"]), float(selected_course["longitude"]), tournament_name, tournament_start)
-        weather_source = "Open-Meteo"
-    except Exception as exc:
-        weather = pd.DataFrame(); weather_source = f"failed: {exc}"
-else:
-    weather = load_repo_csv("weather.csv"); weather_source = "repository fallback" if not weather.empty else "not supplied"
-
-dk_ready = (players_up is not None and not players.empty and {"player", "salary"}.issubset(players.columns) and dk_format != "unrecognized")
-if players_up is None:
-    st.sidebar.info("DK field: not uploaded yet — course/weather lookup is still available")
-elif players_raw.empty:
-    st.sidebar.error("DK field: uploaded file is empty")
-elif dk_format == "unrecognized":
-    st.sidebar.error("DK field: unrecognized format. Upload the untouched DraftKings PGA salary CSV or a players.csv with player/salary columns.")
-elif players.empty:
-    st.sidebar.error("DK field: no valid golfer rows found after normalization")
-
-st.sidebar.subheader("Data integrity")
-if dk_ready:
-    st.sidebar.success(f"DK field: {len(players)} golfers ✓ ({dk_format})")
-advanced_rows = [
-    ("player layer", stats_up, otis_fit_up, player_stats, stats_status),
-    ("results", results_up, None, results, results_status),
-    ("course_history", history_up, None, history, history_status),
-]
-for name, override_up, otis_up, df, status in advanced_rows:
-    if override_up is not None and not df.empty:
-        st.sidebar.success(f"{name}: direct override ✓")
-    elif otis_up is not None and not df.empty:
-        st.sidebar.success(f"{name}: {status} ✓ ({len(df)} golfers)")
-    elif override_up is not None or otis_up is not None:
-        st.sidebar.error(f"{name}: {status}")
-    elif status == "valid" and not df.empty:
-        st.sidebar.warning(f"{name}: repository fallback (unverified)")
-    elif str(status).startswith("incompatible"):
-        st.sidebar.warning(f"{name}: ignored repository fallback — {status}")
-    else:
-        st.sidebar.info(f"{name}: not supplied")
-(st.sidebar.success if holes_source in ("uploaded","Golf Courses API") else st.sidebar.warning)(f"course_holes: {holes_source}")
-(st.sidebar.success if weather_source in ("uploaded","Open-Meteo") else st.sidebar.warning)(f"weather: {weather_source}")
-
-# Exact-name field coverage check after both weekly files are normalized.
-otis_match_count = 0
-otis_unmatched = []
-if dk_ready and not otis_fit.empty:
-    dk_names = set(players["player"].astype(str).str.strip().str.casefold())
-    otis_names = set(otis_fit["player"].astype(str).str.strip().str.casefold())
-    otis_match_count = len(dk_names & otis_names)
-    otis_unmatched = sorted(dk_names - otis_names)
-    if otis_match_count == len(dk_names):
-        st.sidebar.success(f"DK ↔ OTIS match: {otis_match_count}/{len(dk_names)} ✓")
-    else:
-        st.sidebar.warning(f"DK ↔ OTIS coverage: {otis_match_count}/{len(dk_names)}; {len(otis_unmatched)} using neutral fallback")
-
-# Prevent a stale keyed file from silently masquerading as this week's tournament.
-def tournament_coverage(df):
-    if df.empty or "tournament" not in df.columns: return None
-    vals=df["tournament"].dropna().astype(str).str.strip().str.casefold()
-    return bool((vals == tournament_name.strip().casefold()).any())
-coverage_errors=[]
-for label, df in [("course_history.csv",history),("course_holes.csv",holes),("weather.csv",weather)]:
-    match=tournament_coverage(df)
-    if match is False:
-        coverage_errors.append(f"{label} has a tournament column but no rows for '{tournament_name}'.")
-
-st.sidebar.success(f"{tournament_name} — {course_query}")
-sims=st.sidebar.selectbox("Monte Carlo simulations",[25000,50000,100000],index=1)
-
-# Make the limitations visible rather than silently implying full automation.
-with st.expander("V10.6.6 source coverage", expanded=True):
-    c1,c2,c3,c4=st.columns(4)
-    c1.metric("DK field", f"{len(players)} golfers ✓" if dk_ready else "Awaiting upload")
-    c2.metric("Course/holes", "Scorecard auto ✓" if holes_source=="Golf Courses API" else holes_source)
-    c3.metric("Weather", "Auto ✓" if weather_source=="Open-Meteo" else weather_source)
-    c4.metric("OTIS player layer", f"{otis_match_count}/{len(players)} matched" if dk_ready and not otis_fit.empty else ("Uploaded" if not otis_fit.empty else "Awaiting upload"))
-    if otis_fit_up is None:
-        st.warning("Upload the weekly OTIS Advanced Course-Fit CSV before treating projections as production-ready.")
-    elif dk_ready and otis_match_count < len(players):
-        st.warning(f"OTIS coverage is {otis_match_count}/{len(players)} ({otis_match_count/len(players):.1%}). The {len(players)-otis_match_count} unmatched golfers remain in the field and use the model neutral baseline for OTIS Skill/Form/Fit rather than being assigned zero strength.")
-    elif dk_ready:
-        st.success("Weekly player layer complete: full DK ↔ OTIS coverage.")
-
-if "prediction" not in st.session_state: st.session_state.prediction=None; st.session_state.prediction_key=None
-run_key=(tournament_name,course_query,str(tournament_start),sims,getattr(players_up,"name",None),getattr(otis_fit_up,"name",None),getattr(stats_up,"name",None),getattr(results_up,"name",None),getattr(history_up,"name",None),holes_source,weather_source,st.session_state.selected_course_id, selected_course.get("source") if selected_course else None)
-if st.button("Build current-week projections", type="primary"):
-    if players_up is None:
-        st.error("Upload the current DraftKings field before building projections.")
-    elif players_raw.empty:
-        st.error("The uploaded DraftKings file is empty.")
-    elif dk_format == "unrecognized":
-        st.error("Unrecognized DraftKings format. Upload the untouched PGA DKSalaries CSV or a normalized players.csv.")
-    elif players.empty:
-        st.error("No valid golfer rows were found after DraftKings normalization.")
-    elif otis_fit_up is None:
-        st.error("Upload the OTIS Advanced Course-Fit CSV before building production projections.")
-    elif otis_fit.empty:
-        st.error(f"OTIS Course-Fit CSV could not be used: {otis_fit_status}.")
-    elif otis_match_count == 0:
-        st.error("None of the DraftKings golfers matched the OTIS file. Check that the correct weekly OTIS export was uploaded.")
-    elif otis_match_count / len(players) < 0.70:
-        st.error(f"OTIS coverage is only {otis_match_count}/{len(players)} ({otis_match_count/len(players):.1%}). This is below the 70% safety floor; verify the weekly files before building projections.")
-    elif stats_up is not None and stats_status != "valid":
-        st.error(f"Uploaded player_stats.csv is {stats_status}.")
-    elif results_up is not None and results_status != "valid":
-        st.error(f"Uploaded results.csv is {results_status}.")
-    elif history_up is not None and history_status != "valid":
-        st.error(f"Uploaded course_history.csv is {history_status}.")
-    elif coverage_errors:
-        for msg in coverage_errors:
-            st.error(msg + " Replace/refresh that input before running.")
-    else:
-      try:
-        with st.spinner(f"Running {sims:,} tournament simulations..."):
-            pred=predict_from_dataframes(Config(tournament=tournament_name,sims=int(sims),seed=42),players,player_stats,results,history,holes,weather)
-            pred=pred.rename(columns={"dk_proxy":"dk_points_proxy"})
-            st.session_state.prediction=pred; st.session_state.prediction_key=run_key
-        st.success(f"Built projections for {len(pred)} golfers using {sims:,} simulations.")
-      except Exception as exc: st.error(str(exc))
-
-mc=st.session_state.prediction
-if mc is None:
-    st.info("Upload the current DraftKings field, fetch/select the course, verify the source panel, then build projections.")
-    st.stop()
-if st.session_state.prediction_key != run_key:
-    st.warning("Tournament settings or weekly inputs changed. Rebuild projections before optimizing."); st.stop()
-
-page=st.sidebar.radio("View",["Model Dashboard","Portfolio Optimizer","Round 3-Ball / 6-Leg Builder"])
-if page=="Model Dashboard":
-    c1,c2,c3,c4=st.columns(4); c1.metric("Field",len(mc)); c2.metric("Simulations",f"{sims:,}"); c3.metric("Salary floor","$6,500"); c4.metric("DK salary cap","$50,000")
-    st.subheader(f"{tournament_name} Simulation — {course_query}")
-    display_cols=[c for c in ["player","salary","win_pct","top5_pct","top10_pct","top20_pct","make_cut_pct","expected_finish","dk_points_proxy","points_per_1k","course_fit_ceiling"] if c in mc.columns]
-    sort_options=[c for c in ["win_pct","top10_pct","make_cut_pct","dk_points_proxy","course_fit_ceiling","salary"] if c in mc.columns]
-    sort_col=st.selectbox("Sort by",sort_options)
-    st.dataframe(mc.sort_values(sort_col,ascending=(sort_col=="salary"))[display_cols],width="stretch",hide_index=True)
-    st.download_button("Download current-week projections",mc.to_csv(index=False),f"{tournament_name.replace(' ','_')}_projections.csv","text/csv")
-elif page=="Portfolio Optimizer":
-    st.subheader("DraftKings Portfolio Optimizer")
-    a,b,c,d=st.columns(4); lineup_count=a.number_input("Lineups",1,20,10); max_exposure=b.slider("Max exposure",0.10,1.00,0.50,0.05); min_unique=c.number_input("Minimum unique golfers",1,5,3); salary_floor=d.number_input("Minimum lineup salary",40000,50000,46500,100)
-    min_player_salary=st.number_input("Minimum golfer salary",6000,10000,6500,100); strategy=st.selectbox("Strategy",["GPP Ceiling","Balanced / Single Entry","Cut Equity"])
-    names=sorted(mc.player.dropna().astype(str).unique()); locks=st.multiselect("Lock golfers",names); excludes=st.multiselect("Exclude golfers",[n for n in names if n not in locks])
-    st.info("Frozen optimizer defaults: 50% max exposure for 20-max, 3 minimum unique, $6,500 golfer floor, $46,500 lineup floor.")
-    if st.button("Generate portfolio",type="primary"):
-        settings=PortfolioSettings(lineup_count=int(lineup_count),salary_cap=50000,salary_floor=int(salary_floor),min_player_salary=int(min_player_salary),roster_size=6,max_exposure=float(max_exposure),min_unique=int(min_unique),strategy=strategy,seed=42)
-        try:
-            with st.spinner("Optimizing portfolio..."): portfolio,summary,exposure=optimize_portfolio(mc,settings,locks,excludes)
-            st.success(f"Generated {len(summary)} lineups"); st.subheader("Lineup Summary"); st.dataframe(summary,width="stretch",hide_index=True); st.subheader("Lineups"); st.dataframe(portfolio,width="stretch",hide_index=True); st.subheader("Exposure"); st.dataframe(exposure,width="stretch",hide_index=True)
-            st.download_button("Download lineups CSV",portfolio.to_csv(index=False),"pga_lineups.csv","text/csv"); st.download_button("Download exposure CSV",exposure.to_csv(index=False),"pga_exposure.csv","text/csv")
-        except Exception as exc: st.error(str(exc))
-
-else:
-    st.subheader("Round 3-Ball / 6-Leg Parlay Builder")
-    st.caption("Round-specific 3-ball probabilities using True Skill + Course Fit + pre-event Form, with shrunk in-tournament form updates for R2-R4. OTIS Rank/Model are never predictive inputs.")
-    a,b,c,d=st.columns(4)
-    round_no=int(a.selectbox("Round",[1,2,3,4],index=0))
-    round_sims=int(b.selectbox("Round simulations",[25000,50000,100000],index=2))
-    ticket_count=int(c.number_input("6-leg tickets",1,10,5))
-    max_overlap=int(d.slider("Max shared picks between tickets",0,5,4))
-    year=int(tournament_start.year)
-    default_group_url="https://www.pgatour.com/tournaments/pga/playerschamp/index/tee-times"
-    default_tid="R2026527" if "baycurrent" in str(tournament_name).casefold() and year==2026 else ""
-    tournament_id=st.text_input("PGA TOUR tournament ID",value=default_tid,help="Official PGA TOUR event ID. The app also tries to resolve this from the PGA TOUR schedule automatically.")
-    grouping_url=st.text_input("Public grouping URL (fallback/override)",value=default_group_url,help="The app tries PGA TOUR first. Paste a tournament-specific PGA TOUR tee-times URL here if needed; Golf Channel round articles remain a fallback.")
-    grouping_up=st.file_uploader("Grouping CSV fallback (group, tee_time, player1, player2, player3)",type="csv",key=f"groupings_r{round_no}")
-    leaderboard_url=st.text_input("Public leaderboard URL for prior-round form (R2-R4)",value="https://www.pgatour.com/tournaments/pga/playerschamp/index" if round_no>1 else "",disabled=(round_no==1))
-    live_up=st.file_uploader("Prior-round results CSV fallback (player, round, round_score and/or SG components)",type="csv",key=f"live_r{round_no}",disabled=(round_no==1))
-
-    if st.button("Pull groupings + build round model",type="primary"):
-        if otis_fit.empty:
-            st.error("Upload the OTIS Advanced Course-Fit CSV first; the round model requires the Course DNA player layer.")
-        else:
-            if grouping_up is not None:
-                groups=normalize_groupings_upload(pd.read_csv(grouping_up),round_no); gsrc="uploaded grouping CSV"; gnote="manual fallback"
-            else:
-                with st.spinner("Pulling public groupings..."):
-                    groups,gsrc,gnote=fetch_groupings(tournament_name,year,round_no,grouping_url,tournament_id)
-            live=pd.DataFrame(); lnote="R1: no in-tournament adjustment"
-            if round_no>1:
-                if live_up is not None:
-                    live=normalize_live_results(pd.read_csv(live_up)); lnote="uploaded prior-round results"
+            try:
+                players_raw=pd.read_csv(players_up); players,dk_format=normalize_dk_players(players_raw)
+                otis_raw=pd.read_csv(otis_fit_up); otis_fit,otis_status=normalize_otis_course_fit(otis_raw)
+                if players.empty: raise ValueError("DraftKings file did not contain usable PGA golfers.")
+                if otis_fit.empty: raise ValueError(f"OTIS file could not be used: {otis_status}")
+                dk_names=set(players.player.astype(str).str.strip().str.casefold()); onames=set(otis_fit.player.astype(str).str.strip().str.casefold())
+                match_count=len(dk_names & onames)
+                if match_count/len(players)<.70: raise ValueError(f"DK ↔ OTIS coverage is only {match_count}/{len(players)}; below the 70% safety floor.")
+                if stats_up is not None:
+                    player_stats,stats_status=validate_advanced_input(pd.read_csv(stats_up),"player_stats")
+                else: player_stats,stats_status=otis_fit.copy(),otis_status
+                if results_up is not None: results,results_status=validate_advanced_input(pd.read_csv(results_up),"results")
+                else: results,results_status=validate_advanced_input(load_repo_csv("results.csv"),"results")
+                if history_up is not None: history,history_status=validate_advanced_input(pd.read_csv(history_up),"course_history")
+                else: history,history_status=validate_advanced_input(load_repo_csv("course_history.csv"),"course_history")
+                if holes_up is not None:
+                    holes=pd.read_csv(holes_up); holes_source="uploaded"
+                elif selected_course is not None and selected_course.get("source")=="Golf Courses API":
+                    holes,_=cached_course_holes(st.session_state.selected_course_id,tournament_name,gca_key); holes_source="Golf Courses API"
                 else:
-                    with st.spinner("Pulling prior-round leaderboard data..."):
-                        live,lnote=fetch_live_results(leaderboard_url,round_no)
-            if groups.empty:
-                st.error(f"Could not parse public groupings ({gnote}). Use the grouping CSV fallback so the model never guesses pairings.")
+                    holes=pd.DataFrame(); holes_source="not supplied"
+                if weather_up is not None:
+                    weather=pd.read_csv(weather_up); weather_source="uploaded"
+                elif selected_course is not None:
+                    if selected_course.get("source")=="Golf Courses API": weather=cached_weather_gca(st.session_state.selected_course_id,tournament_name,tournament_start,gca_key)
+                    else: weather=cached_weather_location(float(selected_course["latitude"]),float(selected_course["longitude"]),tournament_name,tournament_start)
+                    weather_source="Open-Meteo"
+                else:
+                    weather=pd.DataFrame(); weather_source="not supplied"
+                with st.spinner(f"Running {int(sims):,} tournament simulations..."):
+                    pred=predict_from_dataframes(Config(tournament=tournament_name,sims=int(sims),seed=42),players,player_stats,results,history,holes,weather)
+                    pred=pred.rename(columns={"dk_proxy":"dk_points_proxy"})
+                bundle={"tournament_name":tournament_name,"course_query":course_query,"tournament_start":tournament_start,"country_hint":country_hint,
+                        "players":players,"otis_fit":otis_fit,"player_stats":player_stats,"results":results,"history":history,"holes":holes,"weather":weather,
+                        "holes_source":holes_source,"weather_source":weather_source,"dk_format":dk_format,"otis_status":otis_status,"otis_match_count":match_count,
+                        "sims":int(sims),"prediction":pred,"selected_course":selected_course}
+                st.session_state.pga_bundle=bundle; st.session_state.prediction=pred
+                st.success(f"Setup ready — {len(players)} golfers, DK ↔ OTIS {match_count}/{len(players)}, {int(sims):,} simulations complete.")
+            except Exception as exc:
+                st.error(str(exc))
+
+    b=st.session_state.pga_bundle
+    if b:
+        st.subheader("Current setup status")
+        q1,q2,q3,q4,q5=st.columns(5)
+        q1.metric("Tournament",b["tournament_name"])
+        q2.metric("Field",f"{len(b['players'])} ✓")
+        q3.metric("OTIS",f"{b['otis_match_count']}/{len(b['players'])} ✓")
+        q4.metric("Weather",("Auto ✓" if b["weather_source"]=="Open-Meteo" else b["weather_source"]))
+        q5.metric("Course",b["holes_source"])
+        st.success("Setup is stored for this session. Use the sidebar to go directly to DFS, Round Parlays, Course DNA, or Results.")
+    st.stop()
+
+bundle=st.session_state.pga_bundle
+if not bundle:
+    st.warning("No tournament setup is loaded yet. Go to **🏠 Setup / Inputs**, load the two weekly files, and build the model once.")
+    st.stop()
+
+tournament_name=bundle["tournament_name"]; course_query=bundle["course_query"]; tournament_start=bundle["tournament_start"]
+players=bundle["players"]; otis_fit=bundle["otis_fit"]; player_stats=bundle["player_stats"]; results=bundle["results"]; history=bundle["history"]
+holes=bundle["holes"]; weather=bundle["weather"]; sims=bundle["sims"]; mc=bundle["prediction"]
+
+st.caption(f"**{tournament_name}** • {course_query} • {len(players)} golfers • {sims:,} tournament sims")
+
+if page == "🏆 Tournament DFS":
+    st.header("🏆 Tournament DFS")
+    c1,c2,c3,c4=st.columns(4); c1.metric("Field",len(mc)); c2.metric("Simulations",f"{sims:,}"); c3.metric("Salary cap","$50,000"); c4.metric("OTIS coverage",f"{bundle['otis_match_count']}/{len(players)}")
+    tab1,tab2=st.tabs(["Model Rankings","Build Lineups"])
+    with tab1:
+        display_cols=[c for c in ["player","salary","win_pct","top5_pct","top10_pct","top20_pct","make_cut_pct","expected_finish","dk_points_proxy","points_per_1k","course_fit_ceiling"] if c in mc.columns]
+        sort_options=[c for c in ["win_pct","top10_pct","make_cut_pct","dk_points_proxy","course_fit_ceiling","salary"] if c in mc.columns]
+        sort_col=st.selectbox("Sort by",sort_options)
+        st.dataframe(mc.sort_values(sort_col,ascending=(sort_col=="salary"))[display_cols],width="stretch",hide_index=True)
+        st.download_button("Download projections",mc.to_csv(index=False),f"{tournament_name.replace(' ','_')}_projections.csv","text/csv")
+    with tab2:
+        a,b,c,d=st.columns(4); lineup_count=a.number_input("Lineups",1,20,10); max_exposure=b.slider("Max exposure",.10,1.0,.50,.05); min_unique=c.number_input("Minimum unique golfers",1,5,3); salary_floor=d.number_input("Minimum lineup salary",40000,50000,46500,100)
+        min_player_salary=st.number_input("Minimum golfer salary",6000,10000,6500,100); strategy=st.selectbox("Strategy",["GPP Ceiling","Balanced / Single Entry","Cut Equity"])
+        names=sorted(mc.player.dropna().astype(str).unique()); locks=st.multiselect("Lock golfers",names); excludes=st.multiselect("Exclude golfers",[n for n in names if n not in locks])
+        if st.button("Generate portfolio",type="primary"):
+            settings=PortfolioSettings(lineup_count=int(lineup_count),salary_cap=50000,salary_floor=int(salary_floor),min_player_salary=int(min_player_salary),roster_size=6,max_exposure=float(max_exposure),min_unique=int(min_unique),strategy=strategy,seed=42)
+            try:
+                portfolio,summary,exposure=optimize_portfolio(mc,settings,locks,excludes)
+                st.session_state.dfs_portfolio={"portfolio":portfolio,"summary":summary,"exposure":exposure}
+            except Exception as exc: st.error(str(exc))
+        po=st.session_state.get("dfs_portfolio")
+        if po:
+            st.dataframe(po["summary"],width="stretch",hide_index=True); st.dataframe(po["portfolio"],width="stretch",hide_index=True)
+            st.subheader("Exposure"); st.dataframe(po["exposure"],width="stretch",hide_index=True)
+            st.download_button("Download lineups CSV",po["portfolio"].to_csv(index=False),"pga_lineups.csv","text/csv")
+
+elif page == "🎯 Round Parlays":
+    st.header("🎯 Round Parlays")
+    st.caption("Groupings are pulled automatically from the official PGA TOUR structured feed. Manual controls are hidden unless the automatic source fails.")
+    a,b,c,d=st.columns(4)
+    round_no=int(a.selectbox("Round",[1,2,3,4])); round_sims=int(b.selectbox("Simulations",[25000,50000,100000],index=2)); ticket_count=int(c.number_input("6-leg tickets",1,10,5)); max_overlap=int(d.slider("Max shared picks",0,5,4))
+    year=int(tournament_start.year); default_tid="R2026527" if "baycurrent" in tournament_name.casefold() and year==2026 else ""
+    with st.expander("⚙️ Manual grouping / leaderboard fallback",expanded=False):
+        tournament_id=st.text_input("PGA TOUR tournament ID",value=default_tid)
+        grouping_url=st.text_input("Grouping URL override",value="https://www.pgatour.com/tournaments/pga/playerschamp/index/tee-times")
+        grouping_up=st.file_uploader("Grouping CSV fallback",type="csv",key=f"groupings_r{round_no}")
+        leaderboard_url=st.text_input("Leaderboard URL override",value="https://www.pgatour.com/tournaments/pga/playerschamp/index" if round_no>1 else "",disabled=(round_no==1))
+        live_up=st.file_uploader("Prior-round results CSV fallback",type="csv",key=f"live_r{round_no}",disabled=(round_no==1))
+    if st.button("Run round simulation",type="primary",use_container_width=True):
+        if grouping_up is not None: groups=normalize_groupings_upload(pd.read_csv(grouping_up),round_no); gsrc="uploaded grouping CSV"; gnote="manual fallback"
+        else:
+            with st.spinner("Pulling official PGA TOUR groupings..."): groups,gsrc,gnote=fetch_groupings(tournament_name,year,round_no,grouping_url,tournament_id)
+        live=pd.DataFrame(); lnote="R1: no in-tournament adjustment"
+        if round_no>1:
+            if live_up is not None: live=normalize_live_results(pd.read_csv(live_up)); lnote="uploaded prior-round results"
             else:
-                ratings=build_round_ratings(otis_fit,live,round_no)
-                probs,_=simulate_groups(groups,ratings,n_sims=round_sims,seed=42)
-                summary,legs=build_six_leg_tickets(probs,ticket_count=ticket_count,max_player_overlap=max_overlap)
-                st.session_state.round_parlay={"groups":groups,"ratings":ratings,"probs":probs,"summary":summary,"legs":legs,"gsrc":gsrc,"gnote":gnote,"lnote":lnote,"round":round_no}
+                with st.spinner("Pulling prior-round data..."): live,lnote=fetch_live_results(leaderboard_url,round_no)
+        if groups.empty: st.error(f"Could not load validated groupings ({gnote}). Open the manual fallback only if needed.")
+        else:
+            ratings=build_round_ratings(otis_fit,live,round_no); probs,_=simulate_groups(groups,ratings,n_sims=round_sims,seed=42); summary,legs=build_six_leg_tickets(probs,ticket_count=ticket_count,max_player_overlap=max_overlap)
+            st.session_state.round_parlay={"groups":groups,"ratings":ratings,"probs":probs,"summary":summary,"legs":legs,"gsrc":gsrc,"gnote":gnote,"lnote":lnote,"round":round_no}
     rp=st.session_state.get("round_parlay")
     if rp and rp.get("round")==round_no:
-        st.success(f"Round {round_no} model built from {len(rp['groups'])} groups. Grouping source: {rp['gsrc']} ({rp['gnote']}).")
-        if round_no>1:
-            (st.success if not rp['ratings'].empty and rp['ratings'].live_rounds.max()>0 else st.warning)(f"In-tournament form source: {rp['lnote']}")
-        unmatched=rp['probs'][rp['probs'].status.eq('UNMATCHED')] if not rp['probs'].empty else pd.DataFrame()
-        if not unmatched.empty: st.warning(f"{len(unmatched)} grouping names did not match the OTIS player layer and were excluded rather than guessed.")
-        st.subheader("3-Ball probabilities")
-        ok=rp['probs'][rp['probs'].status.eq('OK')].copy()
-        if not ok.empty:
-            st.dataframe(ok.sort_values(['group','win_pct'],ascending=[True,False]),width="stretch",hide_index=True)
-            st.download_button("Download round probabilities",ok.to_csv(index=False),f"round_{round_no}_3ball_probabilities.csv","text/csv")
-        st.subheader("6-Leg ticket portfolio")
-        if rp['summary'].empty:
-            st.warning("Fewer than six fully matched groups are available; no six-leg ticket was created.")
-        else:
-            st.dataframe(rp['summary'],width="stretch",hide_index=True)
-            st.dataframe(rp['legs'],width="stretch",hide_index=True)
-            st.caption("Strict 6/6 = all six selected golfers win outright. All-legs non-loss includes simulated tie/push outcomes. Sportsbook odds are intentionally not assumed; add offered odds later for EV analysis.")
-            st.download_button("Download 6-leg tickets",rp['legs'].to_csv(index=False),f"round_{round_no}_six_leg_tickets.csv","text/csv")
+        st.success(f"Round {round_no} ready • {len(rp['groups'])} groups • {rp['gsrc']}")
+        ok=rp["probs"][rp["probs"].status.eq("OK")].copy()
+        t1,t2=st.tabs(["3-Ball Probabilities","6-Leg Tickets"])
+        with t1:
+            st.dataframe(ok.sort_values(["group","win_pct"],ascending=[True,False]),width="stretch",hide_index=True)
+            st.download_button("Download probabilities",ok.to_csv(index=False),f"round_{round_no}_3ball_probabilities.csv","text/csv")
+        with t2:
+            if rp["summary"].empty: st.warning("Fewer than six fully matched groups are available.")
+            else:
+                st.dataframe(rp["summary"],width="stretch",hide_index=True); st.dataframe(rp["legs"],width="stretch",hide_index=True)
+                st.download_button("Download 6-leg tickets",rp["legs"].to_csv(index=False),f"round_{round_no}_six_leg_tickets.csv","text/csv")
+
+elif page == "🧬 Course DNA":
+    st.header("🧬 Course DNA")
+    st.caption("What does our weekly model think this course is asking golfers to do?")
+    dna,note=_course_dna(otis_fit)
+    st.subheader(f"{course_query} — Model Thesis")
+    st.info(_dna_thesis(dna,course_query))
+    if dna.empty:
+        st.warning(note)
+    else:
+        m1,m2,m3=st.columns(3); m1.metric("Primary demand",dna.iloc[0]["Requirement"]); m2.metric("Primary emphasis",f"{dna.iloc[0]['Constructed weight %']:.1f}%"); m3.metric("Components",len(dna))
+        st.subheader("Constructed Course DNA")
+        st.dataframe(dna,width="stretch",hide_index=True)
+        st.bar_chart(dna.set_index("Requirement")["Constructed weight %"])
+        st.caption(note)
+        st.warning("Interpretation guardrail: these weights are reconstructed from the visible OTIS weekly Course-Fit components across this field. They are an audit of the model layer, not hidden OTIS source weights and not yet distance-bucket or green-surface DNA.")
+    with st.expander("🔬 Model Construction / Why",expanded=True):
+        st.markdown("**Baseline:** OTIS True Skill establishes golfer strength. **Weekly fit:** Course Fit is the bounded course-specific tilt. **Form:** recent form is reliability-shrunk using Form Rds. **Course DNA audit:** standardized APP/OTT/ARG/PUTT/History component scores are used to reconstruct which visible components most explain this week's Course Fit variation. OTIS Rank and OTIS Model are audit-only and are not predictive inputs.")
+        if not dna.empty:
+            reasons=[]
+            for _,r in dna.iterrows(): reasons.append({"Requirement":r["Requirement"],"Why it matters in this weekly model":f"{r['Emphasis']} reconstructed emphasis; {r['Constructed weight %']:.1f}% of visible component weight."})
+            st.dataframe(pd.DataFrame(reasons),width="stretch",hide_index=True)
+    with st.expander("Future granular Course DNA",expanded=False):
+        st.write("The next data layer can add approach distance buckets (<100, 100–125, 125–150, 150–175, 175–200, 200+), driving distance vs accuracy/positioning, green-surface putting splits, par-type scoring, comparable-course history, and round-specific weather/wave effects. V10.8 does not invent these when the weekly inputs do not contain them.")
+
+else:
+    st.header("📊 Results / Calibration")
+    st.caption("A clean home for post-tournament and round-by-round validation. No hindsight changes are made from this page.")
+    c1,c2,c3=st.columns(3); c1.metric("Tournament model","Ready ✓"); c2.metric("Round model","Available ✓"); c3.metric("Calibration history","Awaiting accumulated results")
+    st.subheader("Current tournament outputs")
+    st.dataframe(mc[[c for c in ["player","win_pct","top5_pct","top10_pct","make_cut_pct","expected_finish","dk_points_proxy"] if c in mc.columns]].head(25),width="stretch",hide_index=True)
+    rp=st.session_state.get("round_parlay")
+    if rp:
+        st.subheader(f"Latest Round {rp['round']} probabilities")
+        ok=rp["probs"][rp["probs"].status.eq("OK")]
+        st.dataframe(ok,width="stretch",hide_index=True)
+    st.info("As rounds finish, this page will compare predicted win/push/loss probabilities with actual 3-ball outcomes and tournament percentiles. We will evaluate calibration across events rather than tune to one result.")
 
 st.divider()
-st.caption("V10.7.2 uses the official PGA TOUR TeeTimes API (with schedule-based tournament-ID discovery) before any HTML fallback. V10.7.1 hardened grouping ingestion with PGA TOUR-first validated 3-player groups. V10.7.0 adds the Round 3-Ball / 6-Leg Builder. Existing V10.6.6b tournament projection and DFS optimizer logic is preserved. Round model uses OTIS True Skill/Course Fit/Form plus shrunk prior-round evidence for R2-R4; public grouping/leaderboard ingestion has CSV fallbacks and never guesses missing groupings.")
+st.caption("V10.8.0 Unified PGA Dashboard — navigation/UI redesign only. V10.7.2 official PGA TOUR TeeTimes API, V10.6.6b tournament model, Course-Fit methodology, round simulation, and parlay methodology are preserved. Course DNA adds a transparent reconstruction/audit view from the visible weekly Course-Fit components; it does not invent unavailable granular inputs.")

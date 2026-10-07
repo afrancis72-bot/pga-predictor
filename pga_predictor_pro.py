@@ -2552,5 +2552,24 @@ def main():
         )
 
 
+def _running_under_streamlit():
+    """Return True when this file is being used as a Streamlit entry point.
+
+    Some existing deployments point Streamlit at pga_predictor_pro.py rather
+    than app.py.  V10.8 keeps the CLI engine intact, but routes Streamlit runs
+    to the unified dashboard so both historical entry-point configurations
+    render the same UI.
+    """
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        return get_script_run_ctx() is not None
+    except Exception:
+        return False
+
+
 if __name__ == "__main__":
-    main()
+    if _running_under_streamlit():
+        import runpy
+        runpy.run_path(str(ROOT / "app.py"), run_name="__main__")
+    else:
+        main()
