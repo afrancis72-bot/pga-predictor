@@ -331,6 +331,47 @@ def build_six_leg_tickets(probs, ticket_count=5, max_player_overlap=4):
             legs.append({'ticket':t,'leg':leg,'group':grp,'player':player,'win_pct':row.win_pct,'push_pct':row.push_pct,'loss_pct':row.loss_pct,'tee_time':row.tee_time})
     return pd.DataFrame(summary),pd.DataFrame(legs)
 
+def fetch_official_prior_rounds(tournament, year, round_no, tournament_id=""):
+    """Official compressed PGA TOUR leaderboard; completed prior rounds only.
+
+    Returns (rows, diagnostic). A missing feed is NOT interpreted as zero form.
+    """
+    if int(round_no) <= 1:
+        return pd.DataFrame(), "R1: no prior rounds required"
+    tid=str(tournament_id or "").strip()
+    if not re.fullmatch(r"R\d{7}",tid):
+        tid=_find_tournament_id(tournament,year)
+    if not tid:
+        return pd.DataFrame(), "Official leaderboard: tournament ID unavailable"
+    q="query LeaderboardCompressedV3($leaderboardCompressedV3Id: ID!) { leaderboardCompressedV3(id: $leaderboardCompressedV3Id) { id payload } }"
+    try:
+        data=_pga_graphql(q,{"leaderboardCompressedV3Id":tid},"LeaderboardCompressedV3")
+        payload=(data.get("leaderboardCompressedV3") or {}).get("payload")
+        if not payload: return pd.DataFrame(),f"Official leaderboard {tid}: empty payload"
+        obj=_decompress_payload(payload)
+        if str(obj.get("formatType", "STROKE_PLAY")) not in ("STROKE_PLAY", ""):
+            return pd.DataFrame(),f"Official leaderboard {tid}: unsupported format"
+        rows=[]
+        for entry in obj.get("players") or []:
+            player=entry.get("player") or {}
+            name=player.get("displayName") or (str(player.get("firstName") or "")+" "+str(player.get("lastName") or "")).strip()
+            scoring=entry.get("scoringData") or {}
+            rounds=scoring.get("rounds") or []
+            if not name or not isinstance(rounds,list): continue
+            for idx,raw in enumerate(rounds[:int(round_no)-1],1):
+                # Leaderboard round scores are gross strokes (e.g. 64), not to-par.
+                # Only completed 18-hole scores in a plausible stroke range qualify.
+                try: score=float(str(raw).strip())
+                except (ValueError,TypeError): continue
+                if not (55 <= score <= 100): continue
+                rows.append({"player":name,"round":idx,"round_score":score})
+        out=pd.DataFrame(rows)
+        if out.empty: return out,f"Official leaderboard {tid}: no completed prior-round scores"
+        return out,f"Official PGA TOUR leaderboard {tid}: {out.player.nunique()} golfers / {len(out)} completed scores"
+    except Exception as exc:
+        return pd.DataFrame(),f"Official leaderboard {tid} unavailable: {exc}"
+
+
 def fetch_live_results(source_url, round_no):
     """Best-effort public leaderboard ingestion. Returns prior-round scores when exposed as HTML tables."""
     if not source_url or not source_url.strip(): return pd.DataFrame(),"No leaderboard URL supplied"

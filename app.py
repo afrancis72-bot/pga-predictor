@@ -7,11 +7,11 @@ import streamlit as st
 from international_ingestion import search_courses, geocode_course, location_detail, fetch_course_detail, fetch_course_holes, fetch_weather, IngestionError
 from portfolio_optimizer import PortfolioSettings, optimize_portfolio
 from pga_predictor_pro import Config, predict_from_dataframes
-from round_parlay import fetch_groupings, normalize_groupings_upload, fetch_live_results, normalize_live_results, build_round_ratings, simulate_groups, build_six_leg_tickets, golfchannel_round_url
+from round_parlay import fetch_groupings, normalize_groupings_upload, fetch_live_results, fetch_official_prior_rounds, normalize_live_results, build_round_ratings, simulate_groups, build_six_leg_tickets, golfchannel_round_url
 
 ROOT = Path(__file__).resolve().parent
 st.set_page_config(page_title="PGA Predictor Pro", page_icon="⛳", layout="wide")
-st.title("⛳ PGA Predictor Pro — Unified Dashboard V10.9.1")
+st.title("⛳ PGA Predictor Pro — Unified Dashboard V10.9.5")
 st.caption("One setup page. Clean model pages. Transparent Course DNA.")
 
 @st.cache_data
@@ -285,10 +285,10 @@ if "prediction" not in st.session_state:
 
 page = st.sidebar.radio(
     "PGA MODEL",
-    ["🏠 Setup / Inputs", "🏆 Tournament DFS", "🎯 Round Parlays", "🧬 Course DNA", "📊 Results / Calibration"],
+    ["🏠 Setup / Inputs", "🏆 Tournament DFS", "🏌️ Round Showdown", "🎯 Round Parlays", "🧬 Course DNA", "📊 Results / Calibration"],
     index=0,
 )
-st.sidebar.caption("V10.9.4 • Course DNA impact audit")
+st.sidebar.caption("V10.9.5 • Round Intelligence + Showdown")
 
 
 def _course_dna(otis):
@@ -497,6 +497,52 @@ if page == "🏆 Tournament DFS":
             st.subheader("Exposure"); st.dataframe(po["exposure"],width="stretch",hide_index=True)
             st.download_button("Download lineups CSV",po["portfolio"].to_csv(index=False),"pga_lineups.csv","text/csv")
 
+elif page == "🏌️ Round Showdown":
+    from round_showdown import build_showdown_pool, optimize_showdown
+    st.header("🏌️ Round Showdown — R2 / R3 / R4")
+    st.caption("Dedicated DraftKings single-round lineups. Uses OTIS pre-round strength, independent Course DNA and verified completed-round scores. Fantasy scores are modeled proxies, not official DraftKings projections.")
+    x1,x2,x3,x4=st.columns(4)
+    sd_round=int(x1.selectbox("Showdown round",[2,3,4],key="sd_round"))
+    sd_count=int(x2.number_input("Lineups",1,20,4,key="sd_count"))
+    sd_cap=float(x3.slider("Max exposure",0.10,1.0,0.50,0.05,key="sd_exposure"))
+    sd_floor=int(x4.number_input("Salary floor",40000,50000,46500,100,key="sd_floor"))
+    sd_up=st.file_uploader("DraftKings PGA Showdown salary CSV (round-specific)",type="csv",key="sd_dk")
+    sd_prior_up=st.file_uploader("Completed prior-round results CSV (optional fallback)",type="csv",key=f"sd_live_{sd_round}")
+    sd_tid=st.text_input("PGA TOUR tournament ID (optional; autodetected)",value="R2026527" if "baycurrent" in tournament_name.casefold() and tournament_start.year==2026 else "",key="sd_tid")
+    if st.button("Build round Showdown",type="primary",use_container_width=True):
+        if sd_up is None:
+            st.error("Upload the round-specific DraftKings Showdown salary file.")
+        else:
+            try:
+                dk,fmt=normalize_dk_players(pd.read_csv(sd_up))
+                if dk.empty: raise ValueError("No valid golfer salaries found in the Showdown CSV.")
+                if sd_prior_up is not None:
+                    sd_live=normalize_live_results(pd.read_csv(sd_prior_up)); source="Uploaded completed-round results"
+                else:
+                    sd_live,source=fetch_official_prior_rounds(tournament_name,int(tournament_start.year),sd_round,sd_tid)
+                if sd_live.empty:
+                    raise ValueError("No verified completed-round scores available. Showdown blocked rather than using R1 ratings. " + source)
+                ratings=build_round_ratings(otis_fit,sd_live,sd_round,tournament_name=tournament_name,use_course_dna=True)
+                pool=build_showdown_pool(dk,ratings,sd_round)
+                covered=int((pool.live_rounds>0).sum())
+                if covered<max(3,int(len(pool)*0.50)):
+                    raise ValueError(f"Only {covered}/{len(pool)} golfers matched completed-round data. Check the CSV/field names.")
+                portfolio,exposure=optimize_showdown(pool,sd_count,sd_cap,sd_floor,seed=42)
+                st.session_state.pga_showdown={"round":sd_round,"pool":pool,"portfolio":portfolio,"exposure":exposure,"source":source,"coverage":covered}
+            except Exception as exc:
+                st.error(str(exc))
+    sd=st.session_state.get("pga_showdown")
+    if sd and sd.get("round")==sd_round:
+        st.success(f"R{sd_round} Showdown • {sd['coverage']}/{len(sd['pool'])} golfers with prior-round evidence • {sd['source']}")
+        p1,p2,p3=st.tabs(["Lineups","Golfer ratings","Exposure"])
+        with p1:
+            st.dataframe(sd["portfolio"],width="stretch",hide_index=True)
+            st.download_button("Download Showdown lineups",sd["portfolio"].to_csv(index=False),f"PGA_R{sd_round}_Showdown_Lineups.csv","text/csv")
+        with p2:
+            st.dataframe(sd["pool"],width="stretch",hide_index=True)
+        with p3:
+            st.dataframe(sd["exposure"],width="stretch",hide_index=True)
+
 elif page == "🎯 Round Parlays":
     st.header("🎯 Round Parlays")
     st.caption("Groupings are pulled automatically from the official PGA TOUR structured feed. Manual controls are hidden unless the automatic source fails.")
@@ -505,9 +551,9 @@ elif page == "🎯 Round Parlays":
     year=int(tournament_start.year); default_tid="R2026527" if "baycurrent" in tournament_name.casefold() and year==2026 else ""
     with st.expander("⚙️ Manual grouping / leaderboard fallback",expanded=False):
         tournament_id=st.text_input("PGA TOUR tournament ID",value=default_tid)
-        grouping_url=st.text_input("Grouping URL override",value="https://www.pgatour.com/tournaments/pga/playerschamp/index/tee-times")
+        grouping_url=st.text_input("Grouping URL override",value="")
         grouping_up=st.file_uploader("Grouping CSV fallback",type="csv",key=f"groupings_r{round_no}")
-        leaderboard_url=st.text_input("Leaderboard URL override",value="https://www.pgatour.com/tournaments/pga/playerschamp/index" if round_no>1 else "",disabled=(round_no==1))
+        leaderboard_url=st.text_input("Leaderboard URL override",value="",disabled=(round_no==1))
         live_up=st.file_uploader("Prior-round results CSV fallback",type="csv",key=f"live_r{round_no}",disabled=(round_no==1))
     if st.button("Run round simulation",type="primary",use_container_width=True):
         if grouping_up is not None: groups=normalize_groupings_upload(pd.read_csv(grouping_up),round_no); gsrc="uploaded grouping CSV"; gnote="manual fallback"
@@ -517,11 +563,25 @@ elif page == "🎯 Round Parlays":
         if round_no>1:
             if live_up is not None: live=normalize_live_results(pd.read_csv(live_up)); lnote="uploaded prior-round results"
             else:
-                with st.spinner("Pulling prior-round data..."): live,lnote=fetch_live_results(leaderboard_url,round_no)
+                with st.spinner("Pulling official completed-round scores..."):
+                    live,lnote=fetch_official_prior_rounds(tournament_name,year,round_no,tournament_id)
+                if live.empty and leaderboard_url.strip():
+                    live,html_note=fetch_live_results(leaderboard_url,round_no)
+                    lnote += " | HTML fallback: " + html_note
         if groups.empty: st.error(f"Could not load validated groupings ({gnote}). Open the manual fallback only if needed.")
         else:
+            # Do not quietly present R2+ as live-informed when all prior scores are missing.
+            if round_no > 1 and live.empty:
+                st.error("No verified completed-round scores loaded. Round-specific simulation blocked to prevent an R1-like rerun. " + lnote)
+                st.stop()
             # Main simulation: independent course DNA ON.
             ratings=build_round_ratings(otis_fit,live,round_no,tournament_name=tournament_name,use_course_dna=True)
+            if round_no > 1:
+                covered=int((ratings.live_rounds>0).sum())
+                st.info(f"Prior-round evidence: {covered}/{len(ratings)} golfers matched • {len(live)} completed-round scores. Source: {lnote}")
+                if covered < max(3,int(len(ratings)*0.50)):
+                    st.error("Prior-round data matches fewer than half the golfers; check names or upload the prior-round CSV before running.")
+                    st.stop()
             probs,_=simulate_groups(groups,ratings,n_sims=round_sims,seed=42)
             summary,legs=build_six_leg_tickets(probs,ticket_count=ticket_count,max_player_overlap=max_overlap)
 
@@ -542,10 +602,11 @@ elif page == "🎯 Round Parlays":
             pick_compare["pick_changed"]=pick_compare["pick_dna_on"]!=pick_compare["pick_dna_off"]
             audit=audit.merge(pick_compare,on="group",how="left")
             audit["DNA changed group pick"]=audit["pick_changed"].map({True:"YES",False:"No"})
-            st.session_state.round_parlay={"groups":groups,"ratings":ratings,"probs":probs,"summary":summary,"legs":legs,"gsrc":gsrc,"gnote":gnote,"lnote":lnote,"round":round_no,"audit":audit,"pick_compare":pick_compare}
+            st.session_state.round_parlay={"groups":groups,"ratings":ratings,"probs":probs,"summary":summary,"legs":legs,"gsrc":gsrc,"gnote":gnote,"lnote":lnote,"round":round_no,"audit":audit,"pick_compare":pick_compare,"live":live,"round_data_note":lnote}
     rp=st.session_state.get("round_parlay")
     if rp and rp.get("round")==round_no:
         st.success(f"Round {round_no} ready • {len(rp['groups'])} groups • {rp['gsrc']}")
+        st.caption("Round evidence: " + rp.get("round_data_note","not recorded"))
         ok=rp["probs"][rp["probs"].status.eq("OK")].copy()
         t1,t2,t3=st.tabs(["3-Ball Probabilities","6-Leg Tickets","🧬 DNA Impact Audit"])
         with t1:
@@ -638,4 +699,4 @@ else:
     st.info("As rounds finish, this page will compare predicted win/push/loss probabilities with actual 3-ball outcomes and tournament percentiles. We will evaluate calibration across events rather than tune to one result.")
 
 st.divider()
-st.caption("V10.9.4 Unified PGA Dashboard — independent researched Course DNA now feeds both Tournament DFS and Round Parlays for the 2026 Baycurrent Classic. V10.7.2 official PGA TOUR TeeTimes API, V10.6.6b tournament model, Course-Fit methodology, round simulation, and parlay methodology are preserved. Course DNA adds a transparent reconstruction/audit view from the visible weekly Course-Fit components; it does not invent unavailable granular inputs.")
+st.caption("V10.9.5 Unified PGA Dashboard — independent researched Course DNA now feeds both Tournament DFS and Round Parlays for the 2026 Baycurrent Classic. V10.7.2 official PGA TOUR TeeTimes API, V10.6.6b tournament model, Course-Fit methodology, round simulation, and parlay methodology are preserved. Course DNA adds a transparent reconstruction/audit view from the visible weekly Course-Fit components; it does not invent unavailable granular inputs.")
