@@ -288,7 +288,7 @@ page = st.sidebar.radio(
     ["🏠 Setup / Inputs", "🏆 Tournament DFS", "🏌️ Round Showdown", "🎯 Round Parlays", "🧬 Course DNA", "📊 Results / Calibration"],
     index=0,
 )
-st.sidebar.caption("V10.9.5 • Round Intelligence + Showdown")
+st.sidebar.caption("V10.9.6 • Showdown Distribution Upgrade")
 
 
 def _course_dna(otis):
@@ -500,7 +500,7 @@ if page == "🏆 Tournament DFS":
 elif page == "🏌️ Round Showdown":
     from round_showdown import build_showdown_pool, optimize_showdown
     st.header("🏌️ Round Showdown — R2 / R3 / R4")
-    st.caption("Dedicated DraftKings single-round lineups. Uses OTIS pre-round strength, independent Course DNA and verified completed-round scores. Fantasy scores are modeled proxies, not official DraftKings projections.")
+    st.caption("Dedicated DraftKings single-round lineups. Uses OTIS pre-round strength, independent Course DNA and verified completed-round scores. Showdown uses a simulated single-round fantasy proxy distribution from round strength, verified prior-round evidence and available OTIS skill components. It is not an official DraftKings projection.")
     x1,x2,x3,x4=st.columns(4)
     sd_round=int(x1.selectbox("Showdown round",[2,3,4],key="sd_round"))
     sd_count=int(x2.number_input("Lineups",1,20,4,key="sd_count"))
@@ -523,7 +523,7 @@ elif page == "🏌️ Round Showdown":
                 if sd_live.empty:
                     raise ValueError("No verified completed-round scores available. Showdown blocked rather than using R1 ratings. " + source)
                 ratings=build_round_ratings(otis_fit,sd_live,sd_round,tournament_name=tournament_name,use_course_dna=True)
-                pool=build_showdown_pool(dk,ratings,sd_round)
+                pool=build_showdown_pool(dk,ratings,sd_round,otis=otis_fit)
                 covered=int((pool.live_rounds>0).sum())
                 if covered<max(3,int(len(pool)*0.50)):
                     raise ValueError(f"Only {covered}/{len(pool)} golfers matched completed-round data. Check the CSV/field names.")
