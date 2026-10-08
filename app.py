@@ -608,6 +608,13 @@ elif page == "🎯 Round Parlays":
         st.success(f"Round {round_no} ready • {len(rp['groups'])} groups • {rp['gsrc']}")
         st.caption("Round evidence: " + rp.get("round_data_note","not recorded"))
         ok=rp["probs"][rp["probs"].status.eq("OK")].copy()
+        # V10.9.5a calibration diagnostics: expose the exact prior-vs-live decomposition
+        # used to create each final round rating so sensitivity tests can be run
+        # without changing the production model.
+        diag_cols=["player","pre_round_rating","live_form_adj","live_rounds"]
+        diag=rp["ratings"][[c for c in diag_cols if c in rp["ratings"].columns]].copy()
+        if "player" in diag.columns:
+            ok=ok.merge(diag,on="player",how="left")
         t1,t2,t3=st.tabs(["3-Ball Probabilities","6-Leg Tickets","🧬 DNA Impact Audit"])
         with t1:
             st.dataframe(ok.sort_values(["group","win_pct"],ascending=[True,False]),width="stretch",hide_index=True)
