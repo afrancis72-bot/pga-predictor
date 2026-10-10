@@ -54,6 +54,12 @@ def add_objectives(df: pd.DataFrame) -> pd.DataFrame:
     d["obj_cut"] = .55*d.z_cut + .20*d.z_top10 + .15*d.z_dk + .10*d.z_conf
     d["obj_balanced"] = .25*d.z_cut + .30*d.z_top10 + .15*d.z_win + .20*d.z_dk + .10*d.z_value
     d["obj_gpp"] = .15*d.z_cut + .30*d.z_top10 + .30*d.z_win + .15*d.z_dk + .10*d.z_value
+    # V11: optimize genuine simulated fantasy outcomes, not V10 rank proxies.
+    # Keep legacy behavior only for older prediction files without V11 columns.
+    if all(c in d.columns for c in ("v11_mean_dk","v11_p75_dk","v11_p90_dk")):
+        d["obj_cut"] = _z(.85*d.v11_mean_dk + .15*d.v11_p75_dk)
+        d["obj_balanced"] = _z(.80*d.v11_mean_dk + .20*d.v11_p75_dk)
+        d["obj_gpp"] = _z(.45*d.v11_mean_dk + .55*d.v11_p90_dk)
     return d
 
 

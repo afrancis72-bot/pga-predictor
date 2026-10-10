@@ -7,6 +7,7 @@ import streamlit as st
 from international_ingestion import search_courses, geocode_course, location_detail, fetch_course_detail, fetch_course_holes, fetch_weather, IngestionError
 from portfolio_optimizer import PortfolioSettings, optimize_portfolio
 from pga_predictor_pro import Config, predict_from_dataframes
+from golf_first_v11 import simulate_golf_first
 from round_parlay import fetch_groupings, normalize_groupings_upload, fetch_live_results, fetch_official_prior_rounds, normalize_live_results, build_round_ratings, simulate_groups, build_six_leg_tickets, golfchannel_round_url
 
 ROOT = Path(__file__).resolve().parent
@@ -392,7 +393,13 @@ if page == "🏠 Setup / Inputs":
         holes_up=st.file_uploader("course_holes.csv override",type="csv",key="setup_holes")
         weather_up=st.file_uploader("weather.csv override",type="csv",key="setup_weather")
 
-    sims=st.selectbox("Tournament simulations",[25000,50000,100000],index=1)
+    st.subheader("V11 • Golf-first fantasy engine")
+    st.caption("V11 simulates holes, applies DK Classic scoring, and optimizes fantasy distributions. Provisional scoring probabilities require calibration; no actual tournament results are used.")
+    sims=st.selectbox("Tournament simulations",[1000,3000,5000],index=1)
+    tournament_format=st.radio("Tournament format",["No cut — all four rounds","Standard cut — after Round 2"],horizontal=True,index=1)
+    cut_size=st.number_input("Approximate cut position (ties included)",min_value=1,max_value=100,value=65,disabled=tournament_format.startswith("No cut"))
+    course_par=st.selectbox("Course par",[70,71,72,73],index=2)
+    st.warning("Confirm cut/no-cut, par, and course hole pars before building. The app cannot infer tournament rules reliably from the tournament name.")
     if st.button("Load inputs & build tournament model",type="primary",use_container_width=True):
         if not tournament_name.strip() or not course_query.strip():
             st.error("Enter the tournament and course.")
@@ -430,11 +437,27 @@ if page == "🏠 Setup / Inputs":
                     weather=pd.DataFrame(); weather_source="not supplied"
                 with st.spinner(f"Running {int(sims):,} tournament simulations..."):
                     pred=predict_from_dataframes(Config(tournament=tournament_name,sims=int(sims),seed=42),players,player_stats,results,history,holes,weather)
-                    pred=pred.rename(columns={"dk_proxy":"dk_points_proxy"})
+                    hole_pars=None
+                    if isinstance(holes,pd.DataFrame) and not holes.empty:
+                        for par_col in ("par","Par","hole_par"):
+                            if par_col in holes.columns:
+                                vals=pd.to_numeric(holes[par_col],errors="coerce").dropna().astype(int).tolist()
+                                if len(vals)==18 and sum(vals)==int(course_par): hole_pars=vals
+                                break
+                    pred,dk_samples,v11_diag=simulate_golf_first(pred,sims=int(sims),seed=42,course_par=int(course_par),
+                        no_cut=tournament_format.startswith("No cut"),cut_size=int(cut_size),hole_pars=hole_pars)
+                    pred["dk_points_proxy"]=pred["v11_mean_dk"]
+                    pred["dk_value_per_1000"]=pred["v11_salary_value"]
+                    pred["make_cut_pct"]=pred["v11_make_cut_pct"]/100.0
+                    pred["top10_pct"]=pred["v11_top10_pct"]/100.0
+                    pred["win_pct"]=pred["v11_win_pct"]/100.0
+                    pred["v11_gpp_objective"]=0.45*pred["v11_mean_dk"]+0.55*pred["v11_p90_dk"]
+                    pred["v11_balanced_objective"]=0.80*pred["v11_mean_dk"]+0.20*pred["v11_p75_dk"]
+                    pred["v11_cut_objective"]=0.85*pred["v11_mean_dk"]+0.15*pred["v11_p75_dk"]
                 bundle={"tournament_name":tournament_name,"course_query":course_query,"tournament_start":tournament_start,"country_hint":country_hint,
                         "players":players,"otis_fit":otis_fit,"player_stats":player_stats,"results":results,"history":history,"holes":holes,"weather":weather,
                         "holes_source":holes_source,"weather_source":weather_source,"dk_format":dk_format,"otis_status":otis_status,"otis_match_count":match_count,
-                        "sims":int(sims),"prediction":pred,"selected_course":selected_course}
+                        "sims":int(sims),"prediction":pred,"selected_course":selected_course,"v11_diagnostics":v11_diag,"tournament_format":tournament_format}
                 st.session_state.pga_bundle=bundle; st.session_state.prediction=pred
                 st.success(f"Setup ready — {len(players)} golfers, DK ↔ OTIS {match_count}/{len(players)}, {int(sims):,} simulations complete.")
             except Exception as exc:
@@ -466,10 +489,13 @@ st.caption(f"**{tournament_name}** • {course_query} • {len(players)} golfers
 if page == "🏆 Tournament DFS":
     st.header("🏆 Tournament DFS")
     c1,c2,c3,c4=st.columns(4); c1.metric("Field",len(mc)); c2.metric("Simulations",f"{sims:,}"); c3.metric("Salary cap","$50,000"); c4.metric("OTIS coverage",f"{bundle['otis_match_count']}/{len(players)}")
+    st.info(f"V11 golf-first active • {bundle.get('tournament_format','format not specified')} • "
+            f"{bundle.get('v11_diagnostics',{}).get('hole_pars_source','unknown hole pars')}. "
+            "DK scoring from simulated golf; probabilities remain provisional until calibrated.")
     tab1,tab2=st.tabs(["Model Rankings","Build Lineups"])
     with tab1:
-        display_cols=[c for c in ["player","salary","win_pct","top5_pct","top10_pct","top20_pct","make_cut_pct","expected_finish","dk_points_proxy","points_per_1k","course_fit_ceiling"] if c in mc.columns]
-        sort_options=[c for c in ["win_pct","top10_pct","make_cut_pct","dk_points_proxy","course_fit_ceiling","salary"] if c in mc.columns]
+        display_cols=[c for c in ["player","salary","win_pct","top5_pct","top10_pct","top20_pct","make_cut_pct","expected_finish","v11_mean_dk","v11_median_dk","v11_p75_dk","v11_p90_dk","v11_p95_dk","v11_avg_birdies","v11_avg_bogeys","dk_points_proxy","course_fit_ceiling"] if c in mc.columns]
+        sort_options=[c for c in ["v11_mean_dk","v11_p90_dk","win_pct","top10_pct","make_cut_pct","course_fit_ceiling","salary"] if c in mc.columns]
         sort_col=st.selectbox("Sort by",sort_options)
         st.dataframe(mc.sort_values(sort_col,ascending=(sort_col=="salary"))[display_cols],width="stretch",hide_index=True)
         st.download_button("Download projections",mc.to_csv(index=False),f"{tournament_name.replace(' ','_')}_projections.csv","text/csv")
