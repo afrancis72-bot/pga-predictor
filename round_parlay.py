@@ -399,3 +399,58 @@ def fetch_live_results(source_url, round_no):
         return pd.DataFrame(),"Leaderboard page did not expose prior-round score tables; upload fallback available"
     except Exception as e:
         return pd.DataFrame(),f"Leaderboard fetch failed: {e}"
+
+
+
+def fetch_official_prior_rounds(tournament, year, round_no, tournament_id=''):
+    """Fetch verified completed round scores from the PGA TOUR compressed leaderboard.
+
+    Returns (long_form_scores, provenance_note). Incomplete or ambiguous round
+    values are not used. Caller blocks R2+ when evidence is unavailable.
+    """
+    try:
+        tid=str(tournament_id or '').strip()
+        if not re.fullmatch(r"R\d{7}",tid):
+            tid=_find_tournament_id(tournament,year)
+        if not tid:
+            return pd.DataFrame(), 'PGA TOUR leaderboard: tournament ID not found'
+        q=('query LeaderboardCompressedV3($leaderboardCompressedV3Id: ID!) '
+           '{ leaderboardCompressedV3(id: $leaderboardCompressedV3Id) { id payload } }')
+        data=_pga_graphql(q,{'leaderboardCompressedV3Id':tid},'LeaderboardCompressedV3')
+        payload=(data.get('leaderboardCompressedV3') or {}).get('payload')
+        if not payload:
+            return pd.DataFrame(),f'PGA TOUR leaderboard {tid}: no payload'
+        parsed=_decompress_payload(payload)
+        if str(parsed.get('formatType','STROKE_PLAY')).upper() not in ('STROKE_PLAY','STROKEPLAY'):
+            return pd.DataFrame(),f'PGA TOUR leaderboard {tid}: unsupported event format'
+        rows=[]
+        for entry in parsed.get('players') or []:
+            player=entry.get('player') or {}
+            name=str(player.get('displayName') or '').strip()
+            scoring=entry.get('scoringData') or {}
+            rounds=scoring.get('rounds') or []
+            if not name or not isinstance(rounds,list):
+                continue
+            for r in range(1,min(int(round_no),5)):
+                if r>len(rounds):
+                    continue
+                raw=rounds[r-1]
+                # PGA TOUR scoringData.rounds is a list of numeric stroke totals;
+                # reject to-par strings, unplayed rounds and dicts without strokes.
+                if isinstance(raw,dict):
+                    raw=raw.get('strokes',raw.get('score'))
+                if isinstance(raw,bool):
+                    continue
+                try:
+                    score=float(raw)
+                except (ValueError,TypeError):
+                    continue
+                if not (55<=score<=100) or not math.isfinite(score):
+                    continue
+                rows.append({'player':name,'round':r,'round_score':score})
+        out=pd.DataFrame(rows,columns=['player','round','round_score'])
+        if not out.empty:
+            out=out.drop_duplicates(['player','round']).reset_index(drop=True)
+        return out,f'PGA TOUR official compressed leaderboard {tid}: {len(out)} completed-round player scores'
+    except Exception as exc:
+        return pd.DataFrame(),f'PGA TOUR official leaderboard fetch failed: {exc}'
