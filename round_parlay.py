@@ -286,7 +286,11 @@ def build_round_ratings(otis, live_results, round_no, tournament_name='', use_co
                 # SG to rating points conservatively; cap and shrink by sample size.
                 signal=o['live_signal'].fillna(0).clip(-3.5,3.5)
                 evidence=np.minimum(o['live_rounds']/max(round_no-1,1),1.)
-                o['live_form_adj']=(signal*7.0*live_weight*evidence/.32).clip(-24,24)
+                # V10.9.8 provisional probability calibration: reduce short-sample overreaction.
+                # These constants are deliberately centralized for future historical backtesting.
+                LIVE_RATING_POINTS_PER_STROKE=5.5
+                LIVE_ADJ_CAP=18.0
+                o['live_form_adj']=(signal*LIVE_RATING_POINTS_PER_STROKE*live_weight*evidence/.32).clip(-LIVE_ADJ_CAP,LIVE_ADJ_CAP)
     # Pressure model activates ONLY with explicit leaderboard and historical
     # same-scenario records. Unknown history means a neutral adjustment.
     if int(round_no)==4 and isinstance(leaderboard,pd.DataFrame) and not leaderboard.empty:
@@ -328,9 +332,14 @@ def simulate_groups(groupings, ratings, n_sims=100000, seed=42, tie_band=0.22):
             continue
         rt=np.array([rmap[k]['round_rating'] for k in keys],float)
         # Convert rating edge to strokes; common group/weather shock cancels head-to-head but preserves coherent round worlds.
-        mu=71.0-(rt-50.0)*0.055
-        common=rng.normal(0,0.85,n_sims)
-        indiv=rng.normal(0,2.55,(n_sims,3))
+        # V10.9.8 provisional calibration. A single-round three-ball should retain
+        # meaningful upset probability even across large rating gaps.
+        RATING_TO_STROKES=0.045
+        ROUND_COMMON_SD=0.85
+        ROUND_INDIV_SD=2.80
+        mu=71.0-(rt-50.0)*RATING_TO_STROKES
+        common=rng.normal(0,ROUND_COMMON_SD,n_sims)
+        indiv=rng.normal(0,ROUND_INDIV_SD,(n_sims,3))
         scores=mu[None,:]+common[:,None]+indiv
         # Continuous tie band approximates integer-score ties without discretizing all latent performance.
         mins=scores.min(axis=1)
