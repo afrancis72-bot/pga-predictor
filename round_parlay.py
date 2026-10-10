@@ -223,52 +223,99 @@ def _baycurrent_independent_fit(o):
     fallback=pd.to_numeric(o.get('otis_course_fit',50),errors='coerce').fillna(50)
     return (num/den.replace(0,np.nan)).fillna(fallback).clip(1,99)
 
-def build_round_ratings(otis, live_results, round_no, tournament_name='', use_course_dna=True):
-    """Round-specific latent strength. OTIS Rank/Model intentionally ignored."""
+def build_round_ratings(otis, live_results, round_no, tournament_name='', use_course_dna=True,
+                        pressure_history=None, leaderboard=None):
+    """Round-aware rating with observable evidence and conservative pressure adjustment.
+
+    Optional pressure_history schema: player, scenario, rounds, sg_vs_baseline.
+    Scenario labels: leader, chase_1_3, chase_4_6, outside.
+    Optional leaderboard schema: player, strokes_back (at end of prior round).
+    Never infer pressure response from a single memorable result.
+    """
     o=otis.copy()
     if o.empty: return pd.DataFrame()
     o['key']=o['player'].map(_norm)
-    # OTIS percentiles: True Skill anchors; course fit/form are bounded tilts.
     ts=pd.to_numeric(o.get('otis_true_skill',50),errors='coerce').fillna(50)
     generic_cf=pd.to_numeric(o.get('otis_course_fit',50),errors='coerce').fillna(50)
     is_baycurrent=('baycurrent' in str(tournament_name).casefold() or 'yokohama' in str(tournament_name).casefold())
     cf=_baycurrent_independent_fit(o) if (is_baycurrent and use_course_dna) else generic_cf
     fm=pd.to_numeric(o.get('otis_form',50),errors='coerce').fillna(50)
-    pre=0.62*ts + 0.23*cf + 0.15*fm
     o['course_fit_signal']=cf
     o['course_fit_source']='Independent Yokohama DNA' if (is_baycurrent and use_course_dna) else 'OTIS Course Fit'
-    o['pre_round_rating']=pre.clip(1,99)
-    o['live_form_adj']=0.0
-    o['live_rounds']=0
+    o['pre_round_rating']=(.62*ts+.23*cf+.15*fm).clip(1,99)
+    o['live_form_adj']=0.0; o['live_rounds']=0
+    o['live_data_quality']='none'
+    o['scenario']='unknown'; o['pressure_adj']=0.0; o['pressure_samples']=0
+    o['pressure_data_quality']='not supplied'
+    # Gradually raise weight of evidence observed on this course.
+    live_weight={1:0.,2:.12,3:.22,4:.32}.get(int(round_no),.32)
+    o['live_weight']=live_weight
     if round_no>1 and live_results is not None and not live_results.empty:
-        lr=live_results.copy(); lr['key']=lr['player'].map(_norm)
-        # Aggregate only completed prior rounds.
-        if 'round' in lr and lr['round'].notna().any(): lr=lr[lr['round'] < round_no]
-        rows=[]
-        for k,g in lr.groupby('key'):
-            n=len(g)
-            # Prefer sustainable SG components. Putting is deliberately discounted.
-            sustainable=None
-            comp=[]
-            for c,wgt in [('sg_approach',0.45),('sg_off_tee',0.25),('sg_around_green',0.15),('sg_putting',0.15)]:
-                if c in g and g[c].notna().any(): comp.append((wgt,float(g[c].mean())))
-            if comp:
-                sw=sum(w for w,_ in comp); sustainable=sum(w*x for w,x in comp)/sw
-            elif 'sg_total' in g and g.sg_total.notna().any(): sustainable=float(g.sg_total.mean())*0.65
-            elif 'round_score' in g and g.round_score.notna().any():
-                # Field-relative scoring fallback, computed later.
-                sustainable=np.nan
-            rows.append((k,n,sustainable,float(g['round_score'].mean()) if 'round_score' in g and g.round_score.notna().any() else np.nan))
-        live=pd.DataFrame(rows,columns=['key','live_rounds','sustainable','avg_score'])
-        if not live.empty:
-            if live.sustainable.isna().any() and live.avg_score.notna().any():
-                med=live.avg_score.median(); live.loc[live.sustainable.isna(),'sustainable']=(med-live.loc[live.sustainable.isna(),'avg_score'])*0.55
-            # Shrink early tournament evidence. ~1.8 rating points per SG, capped.
-            live['live_form_adj']=(live.sustainable.fillna(0)*1.8*np.minimum(live.live_rounds/2.5,1.0)).clip(-7,7)
-            o=o.drop(columns=['live_form_adj','live_rounds']).merge(live[['key','live_rounds','live_form_adj']],on='key',how='left')
-            o['live_rounds']=o.live_rounds.fillna(0).astype(int); o['live_form_adj']=o.live_form_adj.fillna(0)
-    o['round_rating']=(o.pre_round_rating+o.live_form_adj).clip(1,99)
-    return o[['player','key','pre_round_rating','course_fit_signal','course_fit_source','live_form_adj','live_rounds','round_rating']]
+        lr=normalize_live_results(live_results)
+        if not lr.empty:
+            lr['key']=lr['player'].map(_norm)
+            if 'round' in lr:
+                lr=lr[lr['round'].notna() & (lr['round'] < round_no)]
+                lr=lr.drop_duplicates(['key','round'],keep='last')
+            # Field-relative scores use the SAME completed round's field mean;
+            # do not compare raw scores across days with different weather.
+            if 'round_score' in lr:
+                lr['field_relative']=lr.groupby('round')['round_score'].transform('mean')-lr['round_score'] if 'round' in lr else lr['round_score'].mean()-lr['round_score']
+            rows=[]
+            for k,g in lr.groupby('key'):
+                n=len(g); components=[]
+                for col,w in [('sg_approach',.45),('sg_off_tee',.25),('sg_around_green',.15),('sg_putting',.15)]:
+                    if col in g and g[col].notna().any(): components.append((w,float(g[col].mean())))
+                if components:
+                    sw=sum(w for w,_ in components)
+                    signal=sum(w*x for w,x in components)/sw
+                    quality='sg_components'
+                elif 'sg_total' in g and g['sg_total'].notna().any():
+                    signal=float(g['sg_total'].mean()); quality='sg_total'
+                elif 'field_relative' in g and g['field_relative'].notna().any():
+                    signal=float(g['field_relative'].mean()); quality='field_relative_score'
+                else:
+                    continue
+                rows.append((k,n,signal,quality))
+            if rows:
+                live=pd.DataFrame(rows,columns=['key','live_rounds','live_signal','live_data_quality'])
+                o=o.drop(columns=['live_rounds','live_data_quality']).merge(live,on='key',how='left')
+                o['live_rounds']=o['live_rounds'].fillna(0).astype(int)
+                o['live_data_quality']=o['live_data_quality'].fillna('none')
+                # Historical ratings are percentile-like, not strokes. Translate
+                # SG to rating points conservatively; cap and shrink by sample size.
+                signal=o['live_signal'].fillna(0).clip(-3.5,3.5)
+                evidence=np.minimum(o['live_rounds']/max(round_no-1,1),1.)
+                o['live_form_adj']=(signal*7.0*live_weight*evidence/.32).clip(-24,24)
+    # Pressure model activates ONLY with explicit leaderboard and historical
+    # same-scenario records. Unknown history means a neutral adjustment.
+    if int(round_no)==4 and isinstance(leaderboard,pd.DataFrame) and not leaderboard.empty:
+        lb=leaderboard.copy()
+        if {'player','strokes_back'}.issubset(lb.columns):
+            lb['key']=lb['player'].map(_norm)
+            lb['strokes_back']=pd.to_numeric(lb['strokes_back'],errors='coerce')
+            lb=lb[['key','strokes_back']].drop_duplicates('key')
+            o=o.merge(lb,on='key',how='left')
+            back=o['strokes_back']
+            o['scenario']=np.select([back.le(0),back.between(0.01,3),back.between(3.01,6),back.gt(6)],
+                                    ['leader','chase_1_3','chase_4_6','outside'],default='unknown')
+            if isinstance(pressure_history,pd.DataFrame) and not pressure_history.empty:
+                ph=pressure_history.copy()
+                if {'player','scenario','rounds','sg_vs_baseline'}.issubset(ph.columns):
+                    ph['key']=ph['player'].map(_norm)
+                    ph['rounds']=pd.to_numeric(ph['rounds'],errors='coerce').fillna(0).clip(lower=0)
+                    ph['sg_vs_baseline']=pd.to_numeric(ph['sg_vs_baseline'],errors='coerce')
+                    ph=ph.dropna(subset=['sg_vs_baseline']).drop_duplicates(['key','scenario'])
+                    o=o.merge(ph[['key','scenario','rounds','sg_vs_baseline']],on=['key','scenario'],how='left')
+                    n=o['rounds'].fillna(0)
+                    # 12-round shrinkage prior; no unsupported player-specific claims.
+                    o['pressure_adj']=(o['sg_vs_baseline'].fillna(0).clip(-2,2)*4.5*n/(n+12)).clip(-6,6)
+                    o['pressure_samples']=n.astype(int)
+                    o['pressure_data_quality']=np.where(n>0,'historical scenario samples','no matching samples')
+    o['round_rating']=(o['pre_round_rating']+o['live_form_adj']+o['pressure_adj']).clip(1,99)
+    return o[['player','key','pre_round_rating','course_fit_signal','course_fit_source',
+              'live_form_adj','live_rounds','live_weight','live_data_quality',
+              'scenario','pressure_adj','pressure_samples','pressure_data_quality','round_rating']]
 
 def simulate_groups(groupings, ratings, n_sims=100000, seed=42, tie_band=0.22):
     rng=np.random.default_rng(seed); rmap=ratings.set_index('key').to_dict('index') if not ratings.empty else {}
@@ -330,47 +377,6 @@ def build_six_leg_tickets(probs, ticket_count=5, max_player_overlap=4):
             row=p[(p.player==player)&(p.group==grp)].iloc[0]
             legs.append({'ticket':t,'leg':leg,'group':grp,'player':player,'win_pct':row.win_pct,'push_pct':row.push_pct,'loss_pct':row.loss_pct,'tee_time':row.tee_time})
     return pd.DataFrame(summary),pd.DataFrame(legs)
-
-def fetch_official_prior_rounds(tournament, year, round_no, tournament_id=""):
-    """Official compressed PGA TOUR leaderboard; completed prior rounds only.
-
-    Returns (rows, diagnostic). A missing feed is NOT interpreted as zero form.
-    """
-    if int(round_no) <= 1:
-        return pd.DataFrame(), "R1: no prior rounds required"
-    tid=str(tournament_id or "").strip()
-    if not re.fullmatch(r"R\d{7}",tid):
-        tid=_find_tournament_id(tournament,year)
-    if not tid:
-        return pd.DataFrame(), "Official leaderboard: tournament ID unavailable"
-    q="query LeaderboardCompressedV3($leaderboardCompressedV3Id: ID!) { leaderboardCompressedV3(id: $leaderboardCompressedV3Id) { id payload } }"
-    try:
-        data=_pga_graphql(q,{"leaderboardCompressedV3Id":tid},"LeaderboardCompressedV3")
-        payload=(data.get("leaderboardCompressedV3") or {}).get("payload")
-        if not payload: return pd.DataFrame(),f"Official leaderboard {tid}: empty payload"
-        obj=_decompress_payload(payload)
-        if str(obj.get("formatType", "STROKE_PLAY")) not in ("STROKE_PLAY", ""):
-            return pd.DataFrame(),f"Official leaderboard {tid}: unsupported format"
-        rows=[]
-        for entry in obj.get("players") or []:
-            player=entry.get("player") or {}
-            name=player.get("displayName") or (str(player.get("firstName") or "")+" "+str(player.get("lastName") or "")).strip()
-            scoring=entry.get("scoringData") or {}
-            rounds=scoring.get("rounds") or []
-            if not name or not isinstance(rounds,list): continue
-            for idx,raw in enumerate(rounds[:int(round_no)-1],1):
-                # Leaderboard round scores are gross strokes (e.g. 64), not to-par.
-                # Only completed 18-hole scores in a plausible stroke range qualify.
-                try: score=float(str(raw).strip())
-                except (ValueError,TypeError): continue
-                if not (55 <= score <= 100): continue
-                rows.append({"player":name,"round":idx,"round_score":score})
-        out=pd.DataFrame(rows)
-        if out.empty: return out,f"Official leaderboard {tid}: no completed prior-round scores"
-        return out,f"Official PGA TOUR leaderboard {tid}: {out.player.nunique()} golfers / {len(out)} completed scores"
-    except Exception as exc:
-        return pd.DataFrame(),f"Official leaderboard {tid} unavailable: {exc}"
-
 
 def fetch_live_results(source_url, round_no):
     """Best-effort public leaderboard ingestion. Returns prior-round scores when exposed as HTML tables."""
