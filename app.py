@@ -8,6 +8,8 @@ from international_ingestion import search_courses, geocode_course, location_det
 from portfolio_optimizer import PortfolioSettings, optimize_portfolio
 from pga_predictor_pro import Config, predict_from_dataframes
 from golf_first_v11 import simulate_golf_first
+from wind_scenarios_v11_1 import shared_weather_shocks, weather_diagnostics
+from venue_history_v11_1 import venue_history_features
 from round_parlay import fetch_groupings, normalize_groupings_upload, fetch_live_results, fetch_official_prior_rounds, normalize_live_results, build_round_ratings, simulate_groups, build_six_leg_tickets, golfchannel_round_url
 
 ROOT = Path(__file__).resolve().parent
@@ -393,6 +395,13 @@ if page == "🏠 Setup / Inputs":
         holes_up=st.file_uploader("course_holes.csv override",type="csv",key="setup_holes")
         weather_up=st.file_uploader("weather.csv override",type="csv",key="setup_weather")
 
+    st.subheader("V11.1 • Experimental course history and weather")
+    use_v111=st.checkbox("Enable V11.1 adjustments (experimental)",value=False)
+    v111_history_up=st.file_uploader("History CSV: player,course,year,strokes_gained_per_round,rounds",type="csv",disabled=not use_v111)
+    v111_comps=st.text_input("Comparable courses (course:weight, comma-separated)",disabled=not use_v111)
+    v111_wind=st.text_input("Four verified round wind speeds in mph, comma-separated",disabled=not use_v111)
+    v111_wave_up=st.file_uploader("Optional player,wave CSV",type="csv",disabled=not use_v111)
+    st.caption("No fabricated historical results or forecasts. Experimental assumptions require backtesting.")
     st.subheader("V11 • Golf-first fantasy engine")
     st.caption("V11 simulates holes, applies DK Classic scoring, and optimizes fantasy distributions. Provisional scoring probabilities require calibration; no actual tournament results are used.")
     sims=st.selectbox("Tournament simulations",[1000,3000,5000],index=1)
@@ -444,8 +453,36 @@ if page == "🏠 Setup / Inputs":
                                 vals=pd.to_numeric(holes[par_col],errors="coerce").dropna().astype(int).tolist()
                                 if len(vals)==18 and sum(vals)==int(course_par): hole_pars=vals
                                 break
+                    v111_shocks=None
+                    if use_v111:
+                        if v111_history_up is not None:
+                            comps={}
+                            for item in v111_comps.split(","):
+                                if item.strip():
+                                    course,weight=item.rsplit(":",1)
+                                    comps[course.strip()]=float(weight)
+                                    if not 0 <= comps[course.strip()] <= 1:
+                                        raise ValueError("Comparable weights must be 0..1")
+                            hf=venue_history_features(pred[["player"]],pd.read_csv(v111_history_up),
+                                course_query.strip(),comps,int(pd.Timestamp(tournament_start).year))
+                            pred=pred.merge(hf,on="player",how="left",validate="one_to_one")
+                            pred["expected_round"]=pd.to_numeric(pred.expected_round,errors="coerce")-0.15*pred.history_fit
+                        if v111_wind.strip():
+                            speeds=[float(x.strip()) for x in v111_wind.split(",")]
+                            if len(speeds)!=4: raise ValueError("Enter exactly four wind speeds")
+                            waves=["ALL"]*len(pred)
+                            if v111_wave_up is not None:
+                                wave_data=pd.read_csv(v111_wave_up)
+                                if not {"player","wave"}.issubset(wave_data.columns): raise ValueError("Need player,wave")
+                                if wave_data.player.duplicated().any(): raise ValueError("Duplicate golfer in waves")
+                                matched=pred[["player"]].merge(wave_data[["player","wave"]],on="player",how="left",validate="one_to_one")
+                                if matched.wave.isna().any(): raise ValueError("Wave CSV must cover all golfers")
+                                waves=matched.wave.astype(str).tolist()
+                            v111_shocks=shared_weather_shocks(int(sims),waves,speeds,seed=1042)
                     pred,dk_samples,v11_diag=simulate_golf_first(pred,sims=int(sims),seed=42,course_par=int(course_par),
-                        no_cut=tournament_format.startswith("No cut"),cut_size=int(cut_size),hole_pars=hole_pars)
+                        no_cut=tournament_format.startswith("No cut"),cut_size=int(cut_size),hole_pars=hole_pars,weather_shifts=v111_shocks)
+                    if v111_shocks is not None: v11_diag.update(weather_diagnostics(v111_shocks))
+                    v11_diag["v111_history_enabled"]=bool(use_v111 and v111_history_up is not None)
                     pred["dk_points_proxy"]=pred["v11_mean_dk"]
                     pred["dk_value_per_1000"]=pred["v11_salary_value"]
                     pred["make_cut_pct"]=pred["v11_make_cut_pct"]/100.0
