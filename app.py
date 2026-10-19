@@ -10,6 +10,7 @@ from pga_predictor_pro import Config, predict_from_dataframes
 from golf_first_v11 import simulate_golf_first
 from wind_scenarios_v11_1 import shared_weather_shocks, weather_diagnostics
 from venue_history_v11_1 import venue_history_features
+from lineup_simulation_v11_1 import evaluate_lineup_candidates, rank_eight_lineups
 from round_parlay import fetch_groupings, normalize_groupings_upload, fetch_live_results, fetch_official_prior_rounds, normalize_live_results, build_round_ratings, simulate_groups, build_six_leg_tickets, golfchannel_round_url
 
 ROOT = Path(__file__).resolve().parent
@@ -494,7 +495,7 @@ if page == "🏠 Setup / Inputs":
                 bundle={"tournament_name":tournament_name,"course_query":course_query,"tournament_start":tournament_start,"country_hint":country_hint,
                         "players":players,"otis_fit":otis_fit,"player_stats":player_stats,"results":results,"history":history,"holes":holes,"weather":weather,
                         "holes_source":holes_source,"weather_source":weather_source,"dk_format":dk_format,"otis_status":otis_status,"otis_match_count":match_count,
-                        "sims":int(sims),"prediction":pred,"selected_course":selected_course,"v11_diagnostics":v11_diag,"tournament_format":tournament_format}
+                        "sims":int(sims),"prediction":pred,"v11_samples":dk_samples,"selected_course":selected_course,"v11_diagnostics":v11_diag,"tournament_format":tournament_format}
                 st.session_state.pga_bundle=bundle; st.session_state.prediction=pred
                 st.success(f"Setup ready — {len(players)} golfers, DK ↔ OTIS {match_count}/{len(players)}, {int(sims):,} simulations complete.")
             except Exception as exc:
