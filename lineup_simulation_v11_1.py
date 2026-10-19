@@ -66,3 +66,37 @@ def rank_eight_lineups(evaluation: pd.DataFrame, balanced_count: int=6) -> pd.Da
     upside=remaining.nlargest(2,"upside_score").copy()
     upside["portfolio_role"]="upside"
     return pd.concat([balanced,upside],ignore_index=True)
+
+def validate_eight_portfolio(lineups: pd.DataFrame, predictions: pd.DataFrame,
+                             salary_cap: int=50000, salary_floor: int=46500,
+                             max_exposure: float=.50, min_unique: int=3) -> dict:
+    """Check hard constraints on the *actual* eight-lineup portfolio."""
+    if not {"lineup","player"}.issubset(lineups):
+        raise ValueError("Expected lineup and player columns")
+    if not {"player","salary"}.issubset(predictions):
+        raise ValueError("Predictions require player and salary")
+    if lineups.lineup.nunique()!=8 or len(lineups)!=48:
+        raise ValueError("Exactly eight six-golfer lineups required")
+    if predictions.player.duplicated().any():
+        raise ValueError("Duplicate golfers in predictions")
+    salaries=predictions.set_index("player").salary
+    groups=[]
+    for name,g in lineups.groupby("lineup"):
+        members=set(g.player)
+        if len(members)!=6: raise ValueError(f"Lineup {name} has duplicate golfers")
+        if not members.issubset(salaries.index):
+            raise ValueError(f"Unknown golfer in lineup {name}")
+        total=int(pd.to_numeric(salaries.loc[list(members)]).sum())
+        if not salary_floor<=total<=salary_cap:
+            raise ValueError(f"Lineup {name} salary {total} outside bounds")
+        groups.append(members)
+    for i in range(8):
+        for j in range(i+1,8):
+            if len(groups[i]&groups[j])>6-min_unique:
+                raise ValueError(f"Lineups {i+1} and {j+1} violate uniqueness")
+    counts=lineups.player.value_counts()
+    cap=int(np.floor(8*max_exposure+1e-9))
+    if (counts>cap).any():
+        raise ValueError("Exposure cap exceeded")
+    return {"valid":True,"lineups":8,"max_golfer_appearances":int(counts.max()),
+            "exposure_cap_appearances":cap}
