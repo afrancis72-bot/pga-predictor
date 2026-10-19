@@ -539,15 +539,24 @@ if page == "🏆 Tournament DFS":
         st.download_button("Download projections",mc.to_csv(index=False),f"{tournament_name.replace(' ','_')}_projections.csv","text/csv")
     with tab2:
         a,b,c,d=st.columns(4); lineup_count=a.number_input("Lineups",1,20,10); max_exposure=b.slider("Max exposure",.10,1.0,.50,.05); min_unique=c.number_input("Minimum unique golfers",1,5,3); salary_floor=d.number_input("Minimum lineup salary",40000,50000,46500,100)
+        use_eight=st.checkbox("V11.1 eight-lineup evaluation (6 balanced / 2 upside)",value=False)
+        if use_eight: st.caption("Builds a diversified eight-lineup candidate portfolio, then evaluates its correlated simulated fantasy distributions. It does not claim contest ROI.")
         min_player_salary=st.number_input("Minimum golfer salary",6000,10000,6500,100); strategy=st.selectbox("Strategy",["GPP Ceiling","Balanced / Single Entry","Cut Equity"])
         names=sorted(mc.player.dropna().astype(str).unique()); locks=st.multiselect("Lock golfers",names); excludes=st.multiselect("Exclude golfers",[n for n in names if n not in locks])
         if st.button("Generate portfolio",type="primary"):
-            settings=PortfolioSettings(lineup_count=int(lineup_count),salary_cap=50000,salary_floor=int(salary_floor),min_player_salary=int(min_player_salary),roster_size=6,max_exposure=float(max_exposure),min_unique=int(min_unique),strategy=strategy,seed=42)
+            settings=PortfolioSettings(lineup_count=8 if use_eight else int(lineup_count),salary_cap=50000,salary_floor=int(salary_floor),min_player_salary=int(min_player_salary),roster_size=6,max_exposure=float(max_exposure),min_unique=int(min_unique),strategy=strategy,seed=42)
             try:
                 progress=st.progress(0,text="Preparing DFS optimizer…")
                 def _dfs_progress(frac,msg):
                     progress.progress(min(1.0,max(0.0,float(frac))),text=msg)
                 portfolio,summary,exposure=optimize_portfolio(mc,settings,locks,excludes,progress_callback=_dfs_progress)
+                if use_eight:
+                    sample_matrix=bundle.get("v11_samples")
+                    if sample_matrix is None: raise ValueError("Rerun setup to retain V11 simulation samples")
+                    ev=evaluate_lineup_candidates(mc,sample_matrix,portfolio)
+                    roles=rank_eight_lineups(ev)
+                    summary=summary.merge(roles[["lineup","portfolio_role","mean_dk","median_dk","p90_dk","p95_dk","relative_top_fraction_pct"]],on="lineup",how="left",validate="one_to_one")
+                    portfolio=portfolio.merge(roles[["lineup","portfolio_role"]],on="lineup",how="left",validate="many_to_one")
                 st.session_state.dfs_portfolio={"portfolio":portfolio,"summary":summary,"exposure":exposure}
                 progress.empty()
                 st.success(f"Generated {len(summary)} lineups.")
