@@ -519,7 +519,10 @@ if page == "🏠 Setup / Inputs":
                         "sims":int(sims),"prediction":pred,"v11_samples":dk_samples,"selected_course":selected_course,"v11_diagnostics":v11_diag,"tournament_format":tournament_format}
                 st.session_state.pga_bundle=bundle; st.session_state.prediction=pred
                 st.success(f"Setup ready — {len(players)} golfers, {int(sims):,} simulations complete.")
-                if rrg_audit: st.info(f"RickRunGood: {rrg_audit[\u0027field_match\u0027][\u0027matched\u0027]}/{len(players)} golfers matched; {len(rrg_audit[\u0027metrics\u0027])} raw metrics loaded. No RRG weights used.")
+                if rrg_audit:
+                    rrg_count=rrg_audit["field_match"]["matched"]
+                    rrg_metrics=len(rrg_audit["metrics"])
+                    st.info(f"RickRunGood: {rrg_count}/{len(players)} golfers matched; {rrg_metrics} raw metrics loaded. No RRG weights used.")
             except Exception as exc:
                 st.error(str(exc))
 
