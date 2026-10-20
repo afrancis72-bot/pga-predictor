@@ -17,6 +17,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install numpy pandas scipy
       - name: Compile changed modules
-        run: python -m py_compile app.py golf_first_v11.py portfolio_optimizer.py venue_history_v11_1.py wind_scenarios_v11_1.py lineup_simulation_v11_1.py test_v11_1.py
+        run: python -m py_compile app.py golf_first_v11.py portfolio_optimizer.py venue_history_v11_1.py wind_scenarios_v11_1.py lineup_simulation_v11_1.py test_v11_1.py historical_bank_v11_1.py test_historical_bank_v11_1.py
       - name: V11.1 regression tests
-        run: python -m unittest -v test_v11_1
+        run: python -m unittest -v test_v11_1 test_historical_bank_v11_1
