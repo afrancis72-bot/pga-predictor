@@ -10,6 +10,7 @@ from pga_predictor_pro import Config, predict_from_dataframes
 from golf_first_v11 import simulate_golf_first
 from wind_scenarios_v11_1 import shared_weather_shocks, weather_diagnostics
 from venue_history_v11_1 import venue_history_features
+from rickrungood_v11_1 import normalize_rrg_exports, align_rrg_to_field
 from lineup_simulation_v11_1 import evaluate_lineup_candidates, rank_eight_lineups, validate_eight_portfolio, select_eight_from_candidates, generate_candidate_bank
 from round_parlay import fetch_groupings, normalize_groupings_upload, fetch_live_results, fetch_official_prior_rounds, normalize_live_results, build_round_ratings, simulate_groups, build_six_leg_tickets, golfchannel_round_url
 
@@ -396,6 +397,9 @@ if page == "🏠 Setup / Inputs":
         holes_up=st.file_uploader("course_holes.csv override",type="csv",key="setup_holes")
         weather_up=st.file_uploader("weather.csv override",type="csv",key="setup_weather")
 
+    st.subheader("V11.1 • RickRunGood raw statistics")
+    rrg_files=st.file_uploader("RickRunGood custom-model CSVs (multiple exports supported)",type="csv",accept_multiple_files=True,key="setup_rrg")
+    st.caption("Only raw statistical columns are used. RickRunGood Score, Rank, Min% and Max% are excluded.")
     st.subheader("V11.1 • Experimental course history and weather")
     use_v111=st.checkbox("Enable V11.1 adjustments (experimental)",value=False)
     v111_history_up=st.file_uploader("History CSV: player,course,year,strokes_gained_per_round,rounds",type="csv",disabled=not use_v111)
@@ -413,20 +417,37 @@ if page == "🏠 Setup / Inputs":
     if st.button("Load inputs & build tournament model",type="primary",use_container_width=True):
         if not tournament_name.strip() or not course_query.strip():
             st.error("Enter the tournament and course.")
-        elif players_up is None or otis_fit_up is None:
-            st.error("Upload the DraftKings field and OTIS Advanced Course-Fit CSV.")
+        elif players_up is None or (otis_fit_up is None and not rrg_files):
+            st.error("Upload the DraftKings field and either OTIS Course-Fit or RickRunGood CSVs.")
         else:
             try:
                 players_raw=pd.read_csv(players_up); players,dk_format=normalize_dk_players(players_raw)
-                otis_raw=pd.read_csv(otis_fit_up); otis_fit,otis_status=normalize_otis_course_fit(otis_raw)
+                if otis_fit_up is not None:
+                    otis_raw=pd.read_csv(otis_fit_up); otis_fit,otis_status=normalize_otis_course_fit(otis_raw)
+                else:
+                    otis_fit=pd.DataFrame(); otis_status="not supplied"
                 if players.empty: raise ValueError("DraftKings file did not contain usable PGA golfers.")
-                if otis_fit.empty: raise ValueError(f"OTIS file could not be used: {otis_status}")
+                if otis_fit_up is not None and otis_fit.empty: raise ValueError(f"OTIS file could not be used: {otis_status}")
                 dk_names=set(players.player.astype(str).str.strip().str.casefold()); onames=set(otis_fit.player.astype(str).str.strip().str.casefold())
                 match_count=len(dk_names & onames)
-                if match_count/len(players)<.70: raise ValueError(f"DK ↔ OTIS coverage is only {match_count}/{len(players)}; below the 70% safety floor.")
+                if otis_fit_up is not None and match_count/len(players)<.70: raise ValueError(f"DK ↔ OTIS coverage is only {match_count}/{len(players)}; below the 70% safety floor.")
+                rrg_audit=None
+                rrg_aligned=pd.DataFrame()
+                if rrg_files:
+                    rrg,rrg_audit=normalize_rrg_exports([pd.read_csv(f) for f in rrg_files])
+                    rrg_aligned,rrg_match=align_rrg_to_field(players,rrg)
+                    rrg_audit["field_match"]=rrg_match
                 if stats_up is not None:
                     player_stats,stats_status=validate_advanced_input(pd.read_csv(stats_up),"player_stats")
                 else: player_stats,stats_status=otis_fit.copy(),otis_status
+                if not rrg_aligned.empty:
+                    if player_stats.empty:
+                        player_stats=rrg_aligned.copy()
+                    else:
+                        # RRG raw metrics take precedence over same-named OTIS columns.
+                        player_stats=player_stats.drop(columns=[c for c in rrg_aligned if c!="player" and c in player_stats],errors="ignore")
+                        player_stats=player_stats.merge(rrg_aligned,on="player",how="left",validate="one_to_one")
+                    stats_status+=" + RickRunGood raw statistics"
                 if results_up is not None: results,results_status=validate_advanced_input(pd.read_csv(results_up),"results")
                 else: results,results_status=validate_advanced_input(load_repo_csv("results.csv"),"results")
                 if history_up is not None: history,history_status=validate_advanced_input(pd.read_csv(history_up),"course_history")
@@ -494,10 +515,11 @@ if page == "🏠 Setup / Inputs":
                     pred["v11_cut_objective"]=0.85*pred["v11_mean_dk"]+0.15*pred["v11_p75_dk"]
                 bundle={"tournament_name":tournament_name,"course_query":course_query,"tournament_start":tournament_start,"country_hint":country_hint,
                         "players":players,"otis_fit":otis_fit,"player_stats":player_stats,"results":results,"history":history,"holes":holes,"weather":weather,
-                        "holes_source":holes_source,"weather_source":weather_source,"dk_format":dk_format,"otis_status":otis_status,"otis_match_count":match_count,
+                        "holes_source":holes_source,"weather_source":weather_source,"dk_format":dk_format,"otis_status":otis_status,"otis_match_count":match_count,"rrg_audit":rrg_audit,
                         "sims":int(sims),"prediction":pred,"v11_samples":dk_samples,"selected_course":selected_course,"v11_diagnostics":v11_diag,"tournament_format":tournament_format}
                 st.session_state.pga_bundle=bundle; st.session_state.prediction=pred
-                st.success(f"Setup ready — {len(players)} golfers, DK ↔ OTIS {match_count}/{len(players)}, {int(sims):,} simulations complete.")
+                st.success(f"Setup ready — {len(players)} golfers, {int(sims):,} simulations complete.")
+                if rrg_audit: st.info(f"RickRunGood: {rrg_audit[\u0027field_match\u0027][\u0027matched\u0027]}/{len(players)} golfers matched; {len(rrg_audit[\u0027metrics\u0027])} raw metrics loaded. No RRG weights used.")
             except Exception as exc:
                 st.error(str(exc))
 
