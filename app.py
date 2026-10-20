@@ -11,6 +11,7 @@ from golf_first_v11 import simulate_golf_first
 from wind_scenarios_v11_1 import shared_weather_shocks, weather_diagnostics
 from venue_history_v11_1 import venue_history_features
 from rickrungood_v11_1 import normalize_rrg_exports, align_rrg_to_field
+from course_weights_v11_1 import apply_weighted_projection, DEFAULT_ALLOCATION
 from lineup_simulation_v11_1 import evaluate_lineup_candidates, rank_eight_lineups, validate_eight_portfolio, select_eight_from_candidates, generate_candidate_bank
 from round_parlay import fetch_groupings, normalize_groupings_upload, fetch_live_results, fetch_official_prior_rounds, normalize_live_results, build_round_ratings, simulate_groups, build_six_leg_tickets, golfchannel_round_url
 
@@ -400,6 +401,15 @@ if page == "🏠 Setup / Inputs":
     st.subheader("V11.1 • RickRunGood raw statistics")
     rrg_files=st.file_uploader("RickRunGood custom-model CSVs (multiple exports supported)",type="csv",accept_multiple_files=True,key="setup_rrg")
     st.caption("Only raw statistical columns are used. RickRunGood Score, Rank, Min% and Max% are excluded.")
+    st.subheader("V11.1 • Our model weights (experimental)")
+    use_custom_weights=st.checkbox("Use our capped feature-family weighting",value=False)
+    course_pct=st.slider("Course DNA / RickRunGood (%)",0,60,55,5,disabled=not use_custom_weights)
+    form_pct=st.slider("Recent form (%)",0,100,25,5,disabled=not use_custom_weights)
+    history_pct=st.slider("Course history (%)",0,100,10,5,disabled=not use_custom_weights)
+    news_pct=st.slider("Verified player news (%)",0,100,5,5,disabled=not use_custom_weights)
+    context_pct=st.slider("Other verified context (%)",0,100,5,5,disabled=not use_custom_weights)
+    custom_allocation={"course_dna":course_pct/100,"recent_form":form_pct/100,"course_history":history_pct/100,"player_intelligence":news_pct/100,"context":context_pct/100}
+    st.caption("Must total 100%; absent evidence is reallocated, never invented. Current skill weights are research defaults, not historically calibrated.")
     st.subheader("V11.1 • Experimental course history and weather")
     use_v111=st.checkbox("Enable V11.1 adjustments (experimental)",value=False)
     v111_history_up=st.file_uploader("History CSV: player,course,year,strokes_gained_per_round,rounds",type="csv",disabled=not use_v111)
@@ -427,6 +437,8 @@ if page == "🏠 Setup / Inputs":
                 else:
                     otis_fit=pd.DataFrame(); otis_status="not supplied"
                 if players.empty: raise ValueError("DraftKings file did not contain usable PGA golfers.")
+                if use_custom_weights and sum([course_pct,form_pct,history_pct,news_pct,context_pct])!=100:
+                    raise ValueError("Our five feature-family allocations must total 100%")
                 if otis_fit_up is not None and otis_fit.empty: raise ValueError(f"OTIS file could not be used: {otis_status}")
                 dk_names=set(players.player.astype(str).str.strip().str.casefold()); onames=set(otis_fit.player.astype(str).str.strip().str.casefold())
                 match_count=len(dk_names & onames)
@@ -501,9 +513,13 @@ if page == "🏠 Setup / Inputs":
                                 if matched.wave.isna().any(): raise ValueError("Wave CSV must cover all golfers")
                                 waves=matched.wave.astype(str).tolist()
                             v111_shocks=shared_weather_shocks(int(sims),waves,speeds,seed=1042)
+                    weight_audit=None
+                    if use_custom_weights:
+                        pred,weight_audit=apply_weighted_projection(pred,custom_allocation)
                     pred,dk_samples,v11_diag=simulate_golf_first(pred,sims=int(sims),seed=42,course_par=int(course_par),
                         no_cut=tournament_format.startswith("No cut"),cut_size=int(cut_size),hole_pars=hole_pars,weather_shifts=v111_shocks)
                     if v111_shocks is not None: v11_diag.update(weather_diagnostics(v111_shocks))
+                    if weight_audit is not None: v11_diag["feature_family_weights"]=weight_audit
                     v11_diag["v111_history_enabled"]=bool(use_v111 and v111_history_up is not None)
                     pred["dk_points_proxy"]=pred["v11_mean_dk"]
                     pred["dk_value_per_1000"]=pred["v11_salary_value"]
