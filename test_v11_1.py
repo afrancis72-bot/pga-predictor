@@ -29,6 +29,7 @@ class TestV111(unittest.TestCase):
                          "player":[f"P{i}" for i in range(48)]})
         self.assertTrue(validate_eight_portfolio(lu,p,max_exposure=.35)["valid"])
         lu.loc[6,"player"]="P0"
+        lu.loc[12,"player"]="P0"
         with self.assertRaises(ValueError):
             validate_eight_portfolio(lu,p,max_exposure=.35,min_unique=3)
     def test_candidate_selector_distinct(self):
