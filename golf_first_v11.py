@@ -102,7 +102,7 @@ def simulate_golf_first(projections:pd.DataFrame, sims:int=5000, seed:int=42,
     # reproducible outcomes and avoids allocating a sims*n*72*7 tensor.
     for j in range(n):
         for r in range(4):
-            logits=raw[None,:,:]-(common+shifts[j]+latent[:,j,None]+day_shock[:,r,None]+(weather_shifts[:,j,r,None] if weather_shifts is not None else 0.0))[:,:,None]*REL[None,None,:]
+            logits=raw[None,:,:]-(common+shifts[j]+latent[:,j,None]+day_shock[:,r,None]-(weather_shifts[:,j,r,None] if weather_shifts is not None else 0.0))[:,:,None]*REL[None,None,:]
             logits=np.broadcast_to(logits,(sims,18,7)).copy()
             logits[:,:,2]+=birdie_bias[j]
             logits[:,:,3]-=birdie_bias[j]*.5
