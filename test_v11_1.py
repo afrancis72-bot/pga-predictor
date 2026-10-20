@@ -5,9 +5,17 @@ import pandas as pd
 from venue_history_v11_1 import venue_history_features
 from wind_scenarios_v11_1 import shared_weather_shocks
 from golf_first_v11 import simulate_golf_first
-from lineup_simulation_v11_1 import evaluate_lineup_candidates, validate_eight_portfolio, select_eight_from_candidates
+from lineup_simulation_v11_1 import evaluate_lineup_candidates, validate_eight_portfolio, select_eight_from_candidates, generate_candidate_bank
 
 class TestV111(unittest.TestCase):
+    def test_candidate_bank_salary_and_locks(self):
+        p=pd.DataFrame({"player":[f"P{i}" for i in range(20)],
+                        "salary":[8000]*20,"v11_mean_dk":np.arange(20)+60,
+                        "v11_p90_dk":np.arange(20)+90})
+        bank=generate_candidate_bank(p,locks=["P0"],target=30,draws=9000,seed=3)
+        self.assertGreaterEqual(bank.lineup.nunique(),8)
+        self.assertTrue(all("P0" in set(g.player) for _,g in bank.groupby("lineup")))
+        self.assertTrue(all(len(g)==6 for _,g in bank.groupby("lineup")))
     def test_lineup_joint_scores(self):
         p=pd.DataFrame({"player":["A","B","C"]})
         x=np.array([[10.,20.,30.],[30.,10.,20.],[5.,5.,5.]])
