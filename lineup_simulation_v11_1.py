@@ -100,3 +100,68 @@ def validate_eight_portfolio(lineups: pd.DataFrame, predictions: pd.DataFrame,
         raise ValueError("Exposure cap exceeded")
     return {"valid":True,"lineups":8,"max_golfer_appearances":int(counts.max()),
             "exposure_cap_appearances":cap}
+
+def select_eight_from_candidates(predictions: pd.DataFrame, samples: np.ndarray,
+                                 candidates: pd.DataFrame, salary_floor: int=46500,
+                                 max_exposure: float=.50, min_unique: int=3,
+                                 balanced_count: int=6) -> tuple[pd.DataFrame,pd.DataFrame]:
+    """Greedy portfolio selection over a larger legal candidate bank.
+
+    Uses correlated sample outcomes and a soft penalty for lineup-score
+    covariance. Selection is heuristic, not proof of global optimality or ROI.
+    """
+    if balanced_count!=6: raise ValueError("Expected six balanced and two upside")
+    ev=evaluate_lineup_candidates(predictions,samples,candidates)
+    if len(ev)<8: raise ValueError("At least eight candidate lineups required")
+    pool={key:g.copy() for key,g in candidates.groupby("lineup",sort=False)}
+    salaries=predictions.set_index("player").salary
+    eligible={}
+    for _,row in ev.iterrows():
+        key=row["lineup"]; g=pool[key]; members=frozenset(g.player)
+        if len(members)!=6 or not members.issubset(salaries.index): continue
+        salary=int(pd.to_numeric(salaries.loc[list(members)]).sum())
+        if salary_floor<=salary<=50000: eligible[key]=members
+    if len(eligible)<8: raise ValueError("Fewer than eight legal candidate lineups")
+    ix={p:i for i,p in enumerate(predictions.player)}
+    scores=np.asarray(samples,dtype=float)
+    score_by_lineup={key:scores[:,[ix[p] for p in members]].sum(axis=1)
+                     for key,members in eligible.items()}
+    frame=ev[ev.lineup.isin(eligible)].set_index("lineup")
+    # Comparable scale for each scoring criterion.
+    balanced=.60*frame.mean_dk+.40*frame.median_dk
+    upside=.60*frame.p90_dk+.40*frame.p95_dk
+    norm=max(float(frame.mean_dk.std()),1.)
+    selected=[]; counts={}; chosen_scores=[]
+    cap=int(np.floor(8*max_exposure+1e-9))
+    for slot in range(8):
+        role="balanced" if slot<6 else "upside"
+        base=balanced if role=="balanced" else upside
+        best=None; best_value=-np.inf
+        for key,members in eligible.items():
+            if key in selected: continue
+            if any(counts.get(p,0)>=cap for p in members): continue
+            if any(len(members & eligible[old])>6-min_unique for old in selected): continue
+            # Penalize highly correlated lineups; avoid degenerate zero-variance correlations.
+            correlations=[]
+            for prior in chosen_scores:
+                a=score_by_lineup[key]
+                if a.std()>1e-9 and prior.std()>1e-9:
+                    correlations.append(float(np.corrcoef(a,prior)[0,1]))
+            cov_penalty=max(0.,np.mean(correlations)) if correlations else 0.
+            concentration=sum((counts.get(p,0)/max(cap,1))**2 for p in members)
+            value=float(base.loc[key])-.25*norm*cov_penalty-.08*norm*concentration
+            if value>best_value: best,best_value=key,value
+        if best is None:
+            raise ValueError(f"Candidate bank cannot satisfy constraints after {len(selected)} lineups")
+        selected.append(best); chosen_scores.append(score_by_lineup[best])
+        for p in eligible[best]: counts[p]=counts.get(p,0)+1
+    roles={key:("balanced" if i<6 else "upside") for i,key in enumerate(selected)}
+    chosen=candidates[candidates.lineup.isin(selected)].copy()
+    chosen["portfolio_role"]=chosen.lineup.map(roles)
+    report=ev[ev.lineup.isin(selected)].copy()
+    report["portfolio_role"]=report.lineup.map(roles)
+    report["selection_order"]=report.lineup.map({key:i+1 for i,key in enumerate(selected)})
+    report=report.sort_values("selection_order").reset_index(drop=True)
+    validate_eight_portfolio(chosen,predictions,salary_floor=salary_floor,
+                             max_exposure=max_exposure,min_unique=min_unique)
+    return chosen,report
