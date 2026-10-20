@@ -6,9 +6,24 @@ from venue_history_v11_1 import venue_history_features
 from wind_scenarios_v11_1 import shared_weather_shocks
 from golf_first_v11 import simulate_golf_first
 from rickrungood_v11_1 import normalize_rrg_exports, align_rrg_to_field
+from course_weights_v11_1 import apply_weighted_projection, validate_allocation
 from lineup_simulation_v11_1 import evaluate_lineup_candidates, validate_eight_portfolio, select_eight_from_candidates, generate_candidate_bank
 
 class TestV111(unittest.TestCase):
+    def test_capped_weights_and_no_fabricated_news(self):
+        with self.assertRaises(ValueError):
+            validate_allocation({"course_dna":.65,"recent_form":.20,
+                                 "course_history":.05,"player_intelligence":.05,"context":.05})
+        d=pd.DataFrame({"player":["A","B","C","D"],
+                        "expected_round":[0.,0.,0.,0.],
+                        "sg_approach":[2.,1.,-1.,-2.],
+                        "sg_ott":[1.,1.,-1.,-1.],
+                        "form_sg_total":[.5,1.,-.5,-1.]})
+        result,audit=apply_weighted_projection(d)
+        self.assertTrue(audit["applied"])
+        self.assertNotIn("player_intelligence",audit["effective_weights"])
+        self.assertLess(float(result.loc[0,"expected_round"]),0.)
+        self.assertTrue((result.v111_weighted_round_adjustment.abs()<=.35).all())
     def test_rrg_two_exports_and_no_model_weight_leakage(self):
         a=pd.DataFrame({"PlayerId":[1,2],"Player":["A","B"],"Salary":[8000,8100],
                         "Rank":[1,2],"Score":[90.,60.],"Min%":[0,0],"Max%":[100,100],
