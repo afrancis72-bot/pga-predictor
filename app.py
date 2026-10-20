@@ -10,7 +10,7 @@ from pga_predictor_pro import Config, predict_from_dataframes
 from golf_first_v11 import simulate_golf_first
 from wind_scenarios_v11_1 import shared_weather_shocks, weather_diagnostics
 from venue_history_v11_1 import venue_history_features
-from lineup_simulation_v11_1 import evaluate_lineup_candidates, rank_eight_lineups
+from lineup_simulation_v11_1 import evaluate_lineup_candidates, rank_eight_lineups, validate_eight_portfolio
 from round_parlay import fetch_groupings, normalize_groupings_upload, fetch_live_results, fetch_official_prior_rounds, normalize_live_results, build_round_ratings, simulate_groups, build_six_leg_tickets, golfchannel_round_url
 
 ROOT = Path(__file__).resolve().parent
@@ -553,11 +553,12 @@ if page == "🏆 Tournament DFS":
                 if use_eight:
                     sample_matrix=bundle.get("v11_samples")
                     if sample_matrix is None: raise ValueError("Rerun setup to retain V11 simulation samples")
+                    audit=validate_eight_portfolio(portfolio,mc,salary_floor=int(salary_floor),max_exposure=float(max_exposure),min_unique=int(min_unique))
                     ev=evaluate_lineup_candidates(mc,sample_matrix,portfolio)
                     roles=rank_eight_lineups(ev)
                     summary=summary.merge(roles[["lineup","portfolio_role","mean_dk","median_dk","p90_dk","p95_dk","relative_top_fraction_pct"]],on="lineup",how="left",validate="one_to_one")
                     portfolio=portfolio.merge(roles[["lineup","portfolio_role"]],on="lineup",how="left",validate="many_to_one")
-                st.session_state.dfs_portfolio={"portfolio":portfolio,"summary":summary,"exposure":exposure}
+                st.session_state.dfs_portfolio={"portfolio":portfolio,"summary":summary,"exposure":exposure,"constraint_audit":audit if use_eight else None}
                 progress.empty()
                 st.success(f"Generated {len(summary)} lineups.")
             except Exception as exc:
