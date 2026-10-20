@@ -5,8 +5,33 @@ import pandas as pd
 from venue_history_v11_1 import venue_history_features
 from wind_scenarios_v11_1 import shared_weather_shocks
 from golf_first_v11 import simulate_golf_first
+from lineup_simulation_v11_1 import evaluate_lineup_candidates, validate_eight_portfolio, select_eight_from_candidates
 
 class TestV111(unittest.TestCase):
+    def test_lineup_joint_scores(self):
+        p=pd.DataFrame({"player":["A","B","C"]})
+        x=np.array([[10.,20.,30.],[30.,10.,20.],[5.,5.,5.]])
+        lu=pd.DataFrame({"lineup":[1,1,2,2],"player":["A","B","B","C"]})
+        ev=evaluate_lineup_candidates(p,x,lu)
+        self.assertAlmostEqual(float(ev.iloc[0].mean_dk),80/3)
+        self.assertAlmostEqual(float(ev.iloc[1].mean_dk),90/3)
+    def test_portfolio_rejects_excess_exposure(self):
+        p=pd.DataFrame({"player":[f"P{i}" for i in range(48)],"salary":[8000]*48})
+        lu=pd.DataFrame({"lineup":np.repeat(np.arange(8),6),
+                         "player":[f"P{i}" for i in range(48)]})
+        self.assertTrue(validate_eight_portfolio(lu,p,max_exposure=.35)["valid"])
+        lu.loc[6,"player"]="P0"
+        with self.assertRaises(ValueError):
+            validate_eight_portfolio(lu,p,max_exposure=.35,min_unique=3)
+    def test_candidate_selector_distinct(self):
+        p=pd.DataFrame({"player":[f"P{i}" for i in range(48)],"salary":[8000]*48})
+        lu=pd.DataFrame({"lineup":np.repeat(np.arange(8),6),
+                         "player":[f"P{i}" for i in range(48)]})
+        rng=np.random.default_rng(12)
+        x=rng.normal(65,10,size=(100,48))
+        chosen,report=select_eight_from_candidates(p,x,lu,max_exposure=.35)
+        self.assertEqual(len(chosen),48)
+        self.assertEqual((report.portfolio_role=="balanced").sum(),6)
     def test_history_shrinkage_and_no_future_leakage(self):
         players=pd.DataFrame({"player":["A","B"]})
         h=pd.DataFrame({"player":["A","A"],"course":["Port Royal","Port Royal"],
