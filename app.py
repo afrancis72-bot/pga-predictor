@@ -13,6 +13,7 @@ from venue_history_v11_1 import venue_history_features
 from rickrungood_v11_1 import normalize_rrg_exports, align_rrg_to_field
 from course_weights_v11_1 import apply_weighted_projection, DEFAULT_ALLOCATION
 from weight_backtest_v11_1 import evaluate_historical_weights, rolling_out_of_sample
+from historical_outcomes_v11_1 import normalize_historical_outcomes, join_frozen_predictions
 from lineup_simulation_v11_1 import evaluate_lineup_candidates, rank_eight_lineups, validate_eight_portfolio, select_eight_from_candidates, generate_candidate_bank
 from round_parlay import fetch_groupings, normalize_groupings_upload, fetch_live_results, fetch_official_prior_rounds, normalize_live_results, build_round_ratings, simulate_groups, build_six_leg_tickets, golfchannel_round_url
 
@@ -826,6 +827,19 @@ else:
     st.subheader("V11.1 • Historical weight calibration (experimental)")
     st.caption("Upload dated pre-tournament snapshots matched to realized golfer average strokes RELATIVE TO PAR per round. Do not use final tournament stats as pre-event features.")
     historical_up=st.file_uploader("Historical pre-event golfer/event snapshots + outcomes CSV",type="csv",key="v111_historical_calibration")
+    with st.expander("Assemble verified historical calibration input from two files"):
+        st.caption("Use previously frozen model predictions and verified final tournament scores. We will not manufacture past projections from today's golfer stats.")
+        frozen_up=st.file_uploader("Frozen pre-tournament golfer projections CSV",type="csv",key="v111_frozen_projections")
+        outcomes_up=st.file_uploader("Verified historical golfer outcomes CSV",type="csv",key="v111_verified_outcomes")
+        if frozen_up is not None and outcomes_up is not None and st.button("Join historical outcomes to frozen snapshots"):
+            try:
+                historical_outcomes=normalize_historical_outcomes(pd.read_csv(outcomes_up))
+                joined,match_audit=join_frozen_predictions(pd.read_csv(frozen_up),historical_outcomes)
+                st.json(match_audit)
+                st.dataframe(joined.head(20),hide_index=True,width="stretch")
+                st.download_button("Download matched calibration CSV",joined.to_csv(index=False),"pga_v111_matched_history.csv","text/csv")
+            except Exception as exc:
+                st.error(f"Historical join blocked: {exc}")
     if historical_up is not None:
         if st.button("Evaluate fixed weights and chronological holdouts",key="v111_run_calibration"):
             try:
