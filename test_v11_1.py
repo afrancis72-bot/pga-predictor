@@ -7,9 +7,29 @@ from wind_scenarios_v11_1 import shared_weather_shocks
 from golf_first_v11 import simulate_golf_first
 from rickrungood_v11_1 import normalize_rrg_exports, align_rrg_to_field
 from course_weights_v11_1 import apply_weighted_projection, validate_allocation
+from weight_backtest_v11_1 import evaluate_historical_weights, rolling_out_of_sample
 from lineup_simulation_v11_1 import evaluate_lineup_candidates, validate_eight_portfolio, select_eight_from_candidates, generate_candidate_bank
 
 class TestV111(unittest.TestCase):
+    def test_historical_weights_and_chronological_folds(self):
+        rows=[]
+        for e in range(5):
+            for i in range(20):
+                rows.append({"event_id":f"E{e}","event_date":f"2025-0{e+1}-01",
+                             "player":f"P{i}","expected_round":float(i%4),
+                             "actual_round_strokes":float(i%4)+.1,
+                             "sg_approach":float(i),"form_sg_total":float(i%5)})
+        d=pd.DataFrame(rows)
+        summary,events=evaluate_historical_weights(d,min_events=3)
+        self.assertEqual(len(events),10)
+        self.assertAlmostEqual(float(summary.loc[summary.scenario=="baseline","rmse"].iloc[0]),.1)
+        folds,comparison=rolling_out_of_sample(d,min_train_events=3)
+        self.assertEqual(len(folds),2)
+        self.assertEqual(comparison["golfers"],40)
+        with self.assertRaises(ValueError):
+            evaluate_historical_weights(d.drop(columns="actual_round_strokes"))
+        with self.assertRaises(ValueError):
+            evaluate_historical_weights(pd.concat([d,d.iloc[[0]]]))
     def test_capped_weights_and_no_fabricated_news(self):
         with self.assertRaises(ValueError):
             validate_allocation({"course_dna":.65,"recent_form":.20,
