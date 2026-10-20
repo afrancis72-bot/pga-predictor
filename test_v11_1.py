@@ -5,9 +5,26 @@ import pandas as pd
 from venue_history_v11_1 import venue_history_features
 from wind_scenarios_v11_1 import shared_weather_shocks
 from golf_first_v11 import simulate_golf_first
+from rickrungood_v11_1 import normalize_rrg_exports, align_rrg_to_field
 from lineup_simulation_v11_1 import evaluate_lineup_candidates, validate_eight_portfolio, select_eight_from_candidates, generate_candidate_bank
 
 class TestV111(unittest.TestCase):
+    def test_rrg_two_exports_and_no_model_weight_leakage(self):
+        a=pd.DataFrame({"PlayerId":[1,2],"Player":["A","B"],"Salary":[8000,8100],
+                        "Rank":[1,2],"Score":[90.,60.],"Min%":[0,0],"Max%":[100,100],
+                        "SG Approach L36":[.4,np.nan]})
+        b=pd.DataFrame({"PlayerId":[2,1],"Player":["B","A"],"Salary":[8100,8000],
+                        "SG Bermuda L36":[.2,.7]})
+        merged,audit=normalize_rrg_exports([a,b])
+        self.assertEqual(len(merged),2)
+        self.assertNotIn("Score",merged)
+        self.assertNotIn("Rank",merged)
+        self.assertAlmostEqual(float(merged.loc[merged.player=="A","rrg_sg_bermuda_l36"].iloc[0]),.7)
+        aligned,coverage=align_rrg_to_field(pd.DataFrame({"player":["A","B"],"salary":[8000,8100]}),merged)
+        self.assertEqual(coverage["matched"],2)
+        self.assertTrue(pd.isna(aligned.loc[aligned.player=="B","sg_approach"].iloc[0]))
+        with self.assertRaises(ValueError):
+            align_rrg_to_field(pd.DataFrame({"player":["A"],"salary":[9000]}),merged)
     def test_candidate_bank_salary_and_locks(self):
         p=pd.DataFrame({"player":[f"P{i}" for i in range(20)],
                         "salary":[8000]*20,"v11_mean_dk":np.arange(20)+60,
