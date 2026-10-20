@@ -10,7 +10,7 @@ from pga_predictor_pro import Config, predict_from_dataframes
 from golf_first_v11 import simulate_golf_first
 from wind_scenarios_v11_1 import shared_weather_shocks, weather_diagnostics
 from venue_history_v11_1 import venue_history_features
-from lineup_simulation_v11_1 import evaluate_lineup_candidates, rank_eight_lineups, validate_eight_portfolio
+from lineup_simulation_v11_1 import evaluate_lineup_candidates, rank_eight_lineups, validate_eight_portfolio, select_eight_from_candidates
 from round_parlay import fetch_groupings, normalize_groupings_upload, fetch_live_results, fetch_official_prior_rounds, normalize_live_results, build_round_ratings, simulate_groups, build_six_leg_tickets, golfchannel_round_url
 
 ROOT = Path(__file__).resolve().parent
@@ -539,12 +539,12 @@ if page == "🏆 Tournament DFS":
         st.download_button("Download projections",mc.to_csv(index=False),f"{tournament_name.replace(' ','_')}_projections.csv","text/csv")
     with tab2:
         a,b,c,d=st.columns(4); lineup_count=a.number_input("Lineups",1,20,10); max_exposure=b.slider("Max exposure",.10,1.0,.50,.05); min_unique=c.number_input("Minimum unique golfers",1,5,3); salary_floor=d.number_input("Minimum lineup salary",40000,50000,46500,100)
-        use_eight=st.checkbox("V11.1 eight-lineup evaluation (6 balanced / 2 upside)",value=False)
-        if use_eight: st.caption("Builds a diversified eight-lineup candidate portfolio, then evaluates its correlated simulated fantasy distributions. It does not claim contest ROI.")
+        use_eight=st.checkbox("V11.1 eight-lineup candidate-bank selection (6 balanced / 2 upside)",value=False)
+        if use_eight: st.caption("Generates up to 20 legal candidate lineups, then selects eight using correlated fantasy distributions and hard exposure/uniqueness constraints. This is not contest ROI.")
         min_player_salary=st.number_input("Minimum golfer salary",6000,10000,6500,100); strategy=st.selectbox("Strategy",["GPP Ceiling","Balanced / Single Entry","Cut Equity"])
         names=sorted(mc.player.dropna().astype(str).unique()); locks=st.multiselect("Lock golfers",names); excludes=st.multiselect("Exclude golfers",[n for n in names if n not in locks])
         if st.button("Generate portfolio",type="primary"):
-            settings=PortfolioSettings(lineup_count=8 if use_eight else int(lineup_count),salary_cap=50000,salary_floor=int(salary_floor),min_player_salary=int(min_player_salary),roster_size=6,max_exposure=float(max_exposure),min_unique=int(min_unique),strategy=strategy,seed=42)
+            settings=PortfolioSettings(lineup_count=20 if use_eight else int(lineup_count),salary_cap=50000,salary_floor=int(salary_floor),min_player_salary=int(min_player_salary),roster_size=6,max_exposure=1.0 if use_eight else float(max_exposure),min_unique=1 if use_eight else int(min_unique),strategy=strategy,seed=42)
             try:
                 progress=st.progress(0,text="Preparing DFS optimizer…")
                 def _dfs_progress(frac,msg):
@@ -553,11 +553,15 @@ if page == "🏆 Tournament DFS":
                 if use_eight:
                     sample_matrix=bundle.get("v11_samples")
                     if sample_matrix is None: raise ValueError("Rerun setup to retain V11 simulation samples")
-                    audit=validate_eight_portfolio(portfolio,mc,salary_floor=int(salary_floor),max_exposure=float(max_exposure),min_unique=int(min_unique))
-                    ev=evaluate_lineup_candidates(mc,sample_matrix,portfolio)
-                    roles=rank_eight_lineups(ev)
-                    summary=summary.merge(roles[["lineup","portfolio_role","mean_dk","median_dk","p90_dk","p95_dk","relative_top_fraction_pct"]],on="lineup",how="left",validate="one_to_one")
-                    portfolio=portfolio.merge(roles[["lineup","portfolio_role"]],on="lineup",how="left",validate="many_to_one")
+                    selected,roles=select_eight_from_candidates(mc,sample_matrix,portfolio,
+                        salary_floor=int(salary_floor),max_exposure=float(max_exposure),min_unique=int(min_unique))
+                    audit=validate_eight_portfolio(selected,mc,salary_floor=int(salary_floor),
+                        max_exposure=float(max_exposure),min_unique=int(min_unique))
+                    portfolio=selected
+                    summary=roles.merge(summary.drop(columns=["sum_dk_proxy"],errors="ignore"),
+                        on="lineup",how="left",validate="one_to_one")
+                    exposure=portfolio.groupby("player").size().sort_values(ascending=False).rename("lineups").reset_index()
+                    exposure["exposure_pct"]=100*exposure.lineups/8
                 st.session_state.dfs_portfolio={"portfolio":portfolio,"summary":summary,"exposure":exposure,"constraint_audit":audit if use_eight else None}
                 progress.empty()
                 st.success(f"Generated {len(summary)} lineups.")
