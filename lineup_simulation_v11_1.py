@@ -165,3 +165,59 @@ def select_eight_from_candidates(predictions: pd.DataFrame, samples: np.ndarray,
     validate_eight_portfolio(chosen,predictions,salary_floor=salary_floor,
                              max_exposure=max_exposure,min_unique=min_unique)
     return chosen,report
+
+def generate_candidate_bank(predictions: pd.DataFrame, locks=(), excludes=(),
+                            salary_floor: int=46500, min_player_salary: int=6500,
+                            target: int=400, draws: int=100000,
+                            seed: int=42) -> pd.DataFrame:
+    """Generate a diverse, salary-legal bank without portfolio exposure pruning.
+
+    Hard portfolio constraints are applied later to the selected eight. This
+    function does not use ownership or opponent-field assumptions.
+    """
+    if not {"player","salary","v11_mean_dk","v11_p90_dk"}.issubset(predictions):
+        raise ValueError("Candidate generation needs player, salary, V11 mean and p90")
+    d=predictions.copy().dropna(subset=["player","salary","v11_mean_dk","v11_p90_dk"])
+    if d.player.duplicated().any(): raise ValueError("Duplicate golfers")
+    locks=set(locks); excludes=set(excludes)
+    if locks & excludes or len(locks)>6: raise ValueError("Invalid locks/exclusions")
+    d=d[~d.player.isin(excludes)]
+    d=d[pd.to_numeric(d.salary)>=min_player_salary].reset_index(drop=True)
+    if not locks.issubset(set(d.player)): raise ValueError("Locked golfer unavailable")
+    if len(d)<6: raise ValueError("Fewer than six eligible golfers")
+    locked=d.index[d.player.isin(locks)].to_numpy(dtype=int)
+    selectable=d.index[~d.player.isin(locks)].to_numpy(dtype=int)
+    need=6-len(locked)
+    if need>len(selectable): raise ValueError("Not enough golfers after locks")
+    salary=pd.to_numeric(d.salary).to_numpy(dtype=int)
+    mu=pd.to_numeric(d.v11_mean_dk).to_numpy(float)
+    ceiling=pd.to_numeric(d.v11_p90_dk).to_numpy(float)
+    rng=np.random.default_rng(seed)
+    found={}
+    for style in ("balanced","upside","uniform"):
+        strength=(.8*mu+.2*ceiling) if style=="balanced" else (.35*mu+.65*ceiling)
+        strength=(strength-strength.mean())/max(strength.std(),1e-8)
+        for temp in (1.5,3.0,6.0):
+            logw=np.zeros(len(selectable)) if style=="uniform" else strength[selectable]/temp
+            for _ in range(max(1,draws//9//1000)):
+                n=1000
+                if need:
+                    keys=rng.gumbel(size=(n,len(selectable)))+logw[None,:]
+                    pick=selectable[np.argpartition(keys,-need,axis=1)[:,-need:]]
+                else:
+                    pick=np.empty((n,0),dtype=int)
+                for row in pick:
+                    idx=np.concatenate([locked,row])
+                    total=int(salary[idx].sum())
+                    if salary_floor<=total<=50000:
+                        key=tuple(sorted(d.player.iloc[idx].astype(str)))
+                        found[key]=total
+                if len(found)>=target*3: break
+    if len(found)<8:
+        raise ValueError("Could not generate eight legal candidate lineups")
+    # Seeded sample, not just top-scoring lineups, preserves diversity.
+    keys=list(found)
+    rng.shuffle(keys)
+    keys=keys[:target]
+    rows=[{"lineup":i+1,"player":p} for i,key in enumerate(keys) for p in key]
+    return pd.DataFrame(rows)
