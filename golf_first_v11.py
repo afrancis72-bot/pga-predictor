@@ -19,7 +19,8 @@ FINISH = [(1,30),(2,20),(3,18),(4,16),(5,14),(6,12),(7,10),(8,9),(9,8),(10,7),
 def simulate_golf_first(projections:pd.DataFrame, sims:int=5000, seed:int=42,
                         course_par:int=71, no_cut:bool=True, cut_size:int=65,
                         hole_pars:list[int]|None=None,
-                        round_field_mean_to_par:float=-1.5):
+                        round_field_mean_to_par:float=-1.5,
+                        weather_shifts:np.ndarray|None=None):
     """Return player summary, full DK outcomes (sim x player), and diagnostics.
 
     Assumptions: 'expected_round' in V10 is field-centered, NOT absolute strokes.
@@ -44,6 +45,10 @@ def simulate_golf_first(projections:pd.DataFrame, sims:int=5000, seed:int=42,
         hole_pars=[4]*n4+[3]*n3+[5]*n5
     hp=np.asarray(hole_pars,int)
     if len(hp)!=18 or hp.sum()!=course_par: raise ValueError('18 hole pars must total course par')
+    if weather_shifts is not None:
+        weather_shifts=np.asarray(weather_shifts,dtype=float)
+        if weather_shifts.shape != (sims,n,4) or not np.isfinite(weather_shifts).all():
+            raise ValueError('weather_shifts must be finite with shape (sims, golfers, 4)')
     rng=np.random.default_rng(seed)
     # Outcome categories: albatross, eagle, birdie, par, bogey, double, triple+.
     base={3:[.00001,.0002,.105,.715,.155,.022,.00279],
@@ -97,7 +102,7 @@ def simulate_golf_first(projections:pd.DataFrame, sims:int=5000, seed:int=42,
     # reproducible outcomes and avoids allocating a sims*n*72*7 tensor.
     for j in range(n):
         for r in range(4):
-            logits=raw[None,:,:]-(common+shifts[j]+latent[:,j,None]+day_shock[:,r,None])[:,:,None]*REL[None,None,:]
+            logits=raw[None,:,:]-(common+shifts[j]+latent[:,j,None]+day_shock[:,r,None]-(weather_shifts[:,j,r,None] if weather_shifts is not None else 0.0))[:,:,None]*REL[None,None,:]
             logits=np.broadcast_to(logits,(sims,18,7)).copy()
             logits[:,:,2]+=birdie_bias[j]
             logits[:,:,3]-=birdie_bias[j]*.5
@@ -168,4 +173,4 @@ def simulate_golf_first(projections:pd.DataFrame, sims:int=5000, seed:int=42,
                      'field_mean_to_par_assumption':round_field_mean_to_par,
                      'hole_pars_source':'provided course hole pars' if hole_pars is not None else 'generic provisional template',
                      'probability_source':'illustrative baseline, not calibrated to Yokohama hole-level stats',
-                     'golfer_count':n}
+                     'golfer_count':n,'weather_shifts_applied':weather_shifts is not None}

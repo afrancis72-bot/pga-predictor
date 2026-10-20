@@ -1,0 +1,137 @@
+"""Regression checks for PGA V11.1 modules. Run: python -m unittest test_v11_1.py"""
+import unittest
+import numpy as np
+import pandas as pd
+from venue_history_v11_1 import venue_history_features
+from wind_scenarios_v11_1 import shared_weather_shocks
+from golf_first_v11 import simulate_golf_first
+from rickrungood_v11_1 import normalize_rrg_exports, align_rrg_to_field
+from course_weights_v11_1 import apply_weighted_projection, validate_allocation
+from weight_backtest_v11_1 import evaluate_historical_weights, rolling_out_of_sample
+from historical_outcomes_v11_1 import normalize_historical_outcomes, join_frozen_predictions
+from lineup_simulation_v11_1 import evaluate_lineup_candidates, validate_eight_portfolio, select_eight_from_candidates, generate_candidate_bank
+
+class TestV111(unittest.TestCase):
+    def test_verified_outcomes_and_frozen_snapshot_join(self):
+        o=pd.DataFrame([{"event_id":"e","event_date":"2025-01-09","player":"A",
+                         "rounds_played":2,"total_strokes":140,"course_par":72}])
+        outcomes=normalize_historical_outcomes(o)
+        self.assertEqual(float(outcomes.actual_round_strokes.iloc[0]),-2.)
+        snapshots=pd.DataFrame([{"event_id":"e","event_date":"2025-01-09","player":"A",
+                                "expected_round":-1.,"snapshot_captured_at":"2025-01-08T12:00:00Z"}])
+        joined,audit=join_frozen_predictions(snapshots,outcomes)
+        self.assertEqual(audit["matched"],1)
+        with self.assertRaises(ValueError):
+            late=snapshots.copy()
+            late["snapshot_captured_at"]="2025-01-10T12:00:00Z"
+            join_frozen_predictions(late,outcomes)
+    def test_historical_weights_and_chronological_folds(self):
+        rows=[]
+        for e in range(5):
+            for i in range(20):
+                rows.append({"event_id":f"E{e}","event_date":f"2025-0{e+1}-01",
+                             "player":f"P{i}","expected_round":float(i%4),
+                             "actual_round_strokes":float(i%4)+.1,
+                             "sg_approach":float(i),"form_sg_total":float(i%5)})
+        d=pd.DataFrame(rows)
+        summary,events=evaluate_historical_weights(d,min_events=3)
+        self.assertEqual(len(events),10)
+        self.assertAlmostEqual(float(summary.loc[summary.scenario=="baseline","rmse"].iloc[0]),.1)
+        folds,comparison=rolling_out_of_sample(d,min_train_events=3)
+        self.assertEqual(len(folds),2)
+        self.assertEqual(comparison["golfers"],40)
+        with self.assertRaises(ValueError):
+            evaluate_historical_weights(d.drop(columns="actual_round_strokes"))
+        with self.assertRaises(ValueError):
+            evaluate_historical_weights(pd.concat([d,d.iloc[[0]]]))
+    def test_capped_weights_and_no_fabricated_news(self):
+        with self.assertRaises(ValueError):
+            validate_allocation({"course_dna":.65,"recent_form":.20,
+                                 "course_history":.05,"player_intelligence":.05,"context":.05})
+        d=pd.DataFrame({"player":["A","B","C","D"],
+                        "expected_round":[0.,0.,0.,0.],
+                        "sg_approach":[2.,1.,-1.,-2.],
+                        "sg_ott":[1.,1.,-1.,-1.],
+                        "form_sg_total":[.5,1.,-.5,-1.]})
+        result,audit=apply_weighted_projection(d)
+        self.assertTrue(audit["applied"])
+        self.assertNotIn("player_intelligence",audit["effective_weights"])
+        self.assertLess(float(result.loc[0,"expected_round"]),0.)
+        self.assertTrue((result.v111_weighted_round_adjustment.abs()<=.35).all())
+    def test_rrg_two_exports_and_no_model_weight_leakage(self):
+        a=pd.DataFrame({"PlayerId":[1,2],"Player":["A","B"],"Salary":[8000,8100],
+                        "Rank":[1,2],"Score":[90.,60.],"Min%":[0,0],"Max%":[100,100],
+                        "SG Approach L36":[.4,np.nan]})
+        b=pd.DataFrame({"PlayerId":[2,1],"Player":["B","A"],"Salary":[8100,8000],
+                        "SG Bermuda L36":[.2,.7]})
+        merged,audit=normalize_rrg_exports([a,b])
+        self.assertEqual(len(merged),2)
+        self.assertNotIn("Score",merged)
+        self.assertNotIn("Rank",merged)
+        self.assertAlmostEqual(float(merged.loc[merged.player=="A","rrg_sg_bermuda_l36"].iloc[0]),.7)
+        aligned,coverage=align_rrg_to_field(pd.DataFrame({"player":["A","B"],"salary":[8000,8100]}),merged)
+        self.assertEqual(coverage["matched"],2)
+        self.assertTrue(pd.isna(aligned.loc[aligned.player=="B","sg_approach"].iloc[0]))
+        with self.assertRaises(ValueError):
+            align_rrg_to_field(pd.DataFrame({"player":["A"],"salary":[9000]}),merged)
+    def test_candidate_bank_salary_and_locks(self):
+        p=pd.DataFrame({"player":[f"P{i}" for i in range(20)],
+                        "salary":[8000]*20,"v11_mean_dk":np.arange(20)+60,
+                        "v11_p90_dk":np.arange(20)+90})
+        bank=generate_candidate_bank(p,locks=["P0"],target=30,draws=9000,seed=3)
+        self.assertGreaterEqual(bank.lineup.nunique(),8)
+        self.assertTrue(all("P0" in set(g.player) for _,g in bank.groupby("lineup")))
+        self.assertTrue(all(len(g)==6 for _,g in bank.groupby("lineup")))
+    def test_lineup_joint_scores(self):
+        p=pd.DataFrame({"player":["A","B","C"]})
+        x=np.array([[10.,20.,30.],[30.,10.,20.],[5.,5.,5.]])
+        lu=pd.DataFrame({"lineup":[1,1,2,2],"player":["A","B","B","C"]})
+        ev=evaluate_lineup_candidates(p,x,lu)
+        self.assertAlmostEqual(float(ev.iloc[0].mean_dk),80/3)
+        self.assertAlmostEqual(float(ev.iloc[1].mean_dk),90/3)
+    def test_portfolio_rejects_excess_exposure(self):
+        p=pd.DataFrame({"player":[f"P{i}" for i in range(48)],"salary":[8000]*48})
+        lu=pd.DataFrame({"lineup":np.repeat(np.arange(8),6),
+                         "player":[f"P{i}" for i in range(48)]})
+        self.assertTrue(validate_eight_portfolio(lu,p,max_exposure=.35)["valid"])
+        lu.loc[6,"player"]="P0"
+        lu.loc[12,"player"]="P0"
+        with self.assertRaises(ValueError):
+            validate_eight_portfolio(lu,p,max_exposure=.35,min_unique=3)
+    def test_candidate_selector_distinct(self):
+        p=pd.DataFrame({"player":[f"P{i}" for i in range(48)],"salary":[8000]*48})
+        lu=pd.DataFrame({"lineup":np.repeat(np.arange(8),6),
+                         "player":[f"P{i}" for i in range(48)]})
+        rng=np.random.default_rng(12)
+        x=rng.normal(65,10,size=(100,48))
+        chosen,report=select_eight_from_candidates(p,x,lu,max_exposure=.35)
+        self.assertEqual(len(chosen),48)
+        self.assertEqual((report.portfolio_role=="balanced").sum(),6)
+    def test_history_shrinkage_and_no_future_leakage(self):
+        players=pd.DataFrame({"player":["A","B"]})
+        h=pd.DataFrame({"player":["A","A"],"course":["Port Royal","Port Royal"],
+                        "year":[2025,2026],"strokes_gained_per_round":[2.,100.],"rounds":[4,4]})
+        d=venue_history_features(players,h,"Port Royal",{},2026)
+        self.assertAlmostEqual(float(d.loc[0,"venue_fit"]),0.5)
+        self.assertEqual(float(d.loc[1,"venue_fit"]),0.0)
+    def test_shared_wave_shocks(self):
+        w=shared_weather_shocks(100,["AM","AM","PM"],[10,20,25,15])
+        self.assertEqual(w.shape,(100,3,4))
+        np.testing.assert_array_equal(w[:,0,:],w[:,1,:])
+        self.assertTrue(np.isfinite(w).all())
+    def test_weather_shape_guard(self):
+        d=pd.DataFrame({"player":["A","B"],"salary":[8000,9000],
+                        "expected_round":[0.,0.],"round_sd":[2.7,2.7]})
+        with self.assertRaises(ValueError):
+            simulate_golf_first(d,sims=100,weather_shifts=np.zeros((100,3,4)))
+    def test_weather_changes_scoring(self):
+        d=pd.DataFrame({"player":["A","B"],"salary":[8000,9000],
+                        "expected_round":[0.,0.],"round_sd":[2.7,2.7]})
+        base,_,_=simulate_golf_first(d,sims=100,seed=7)
+        wind,_,diag=simulate_golf_first(d,sims=100,seed=7,
+                              weather_shifts=np.full((100,2,4),0.6))
+        self.assertTrue(diag["weather_shifts_applied"])
+        self.assertGreater(float(wind.v11_avg_strokes.mean()),float(base.v11_avg_strokes.mean()))
+
+if __name__=="__main__":
+    unittest.main()
