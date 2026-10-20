@@ -1,0 +1,22 @@
+name: PGA V11.1 checks
+on:
+  push:
+    branches: [feature/pga-v11-1-course-dna]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy pandas scipy
+      - name: Compile changed modules
+        run: python -m py_compile app.py golf_first_v11.py portfolio_optimizer.py venue_history_v11_1.py wind_scenarios_v11_1.py lineup_simulation_v11_1.py test_v11_1.py
+      - name: V11.1 regression tests
+        run: python -m unittest -v test_v11_1
