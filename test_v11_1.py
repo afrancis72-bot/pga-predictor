@@ -8,9 +8,23 @@ from golf_first_v11 import simulate_golf_first
 from rickrungood_v11_1 import normalize_rrg_exports, align_rrg_to_field
 from course_weights_v11_1 import apply_weighted_projection, validate_allocation
 from weight_backtest_v11_1 import evaluate_historical_weights, rolling_out_of_sample
+from historical_outcomes_v11_1 import normalize_historical_outcomes, join_frozen_predictions
 from lineup_simulation_v11_1 import evaluate_lineup_candidates, validate_eight_portfolio, select_eight_from_candidates, generate_candidate_bank
 
 class TestV111(unittest.TestCase):
+    def test_verified_outcomes_and_frozen_snapshot_join(self):
+        o=pd.DataFrame([{"event_id":"e","event_date":"2025-01-09","player":"A",
+                         "rounds_played":2,"total_strokes":140,"course_par":72}])
+        outcomes=normalize_historical_outcomes(o)
+        self.assertEqual(float(outcomes.actual_round_strokes.iloc[0]),-2.)
+        snapshots=pd.DataFrame([{"event_id":"e","event_date":"2025-01-09","player":"A",
+                                "expected_round":-1.,"snapshot_captured_at":"2025-01-08T12:00:00Z"}])
+        joined,audit=join_frozen_predictions(snapshots,outcomes)
+        self.assertEqual(audit["matched"],1)
+        with self.assertRaises(ValueError):
+            late=snapshots.copy()
+            late["snapshot_captured_at"]="2025-01-10T12:00:00Z"
+            join_frozen_predictions(late,outcomes)
     def test_historical_weights_and_chronological_folds(self):
         rows=[]
         for e in range(5):
