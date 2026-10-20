@@ -12,6 +12,7 @@ from wind_scenarios_v11_1 import shared_weather_shocks, weather_diagnostics
 from venue_history_v11_1 import venue_history_features
 from rickrungood_v11_1 import normalize_rrg_exports, align_rrg_to_field
 from course_weights_v11_1 import apply_weighted_projection, DEFAULT_ALLOCATION
+from weight_backtest_v11_1 import evaluate_historical_weights, rolling_out_of_sample
 from lineup_simulation_v11_1 import evaluate_lineup_candidates, rank_eight_lineups, validate_eight_portfolio, select_eight_from_candidates, generate_candidate_bank
 from round_parlay import fetch_groupings, normalize_groupings_upload, fetch_live_results, fetch_official_prior_rounds, normalize_live_results, build_round_ratings, simulate_groups, build_six_leg_tickets, golfchannel_round_url
 
@@ -822,6 +823,25 @@ else:
     st.header("📊 Results / Calibration")
     st.caption("A clean home for post-tournament and round-by-round validation. No hindsight changes are made from this page.")
     c1,c2,c3=st.columns(3); c1.metric("Tournament model","Ready ✓"); c2.metric("Round model","Available ✓"); c3.metric("Calibration history","Awaiting accumulated results")
+    st.subheader("V11.1 • Historical weight calibration (experimental)")
+    st.caption("Upload dated pre-tournament snapshots matched to realized golfer average strokes RELATIVE TO PAR per round. Do not use final tournament stats as pre-event features.")
+    historical_up=st.file_uploader("Historical pre-event golfer/event snapshots + outcomes CSV",type="csv",key="v111_historical_calibration")
+    if historical_up is not None:
+        if st.button("Evaluate fixed weights and chronological holdouts",key="v111_run_calibration"):
+            try:
+                historical=pd.read_csv(historical_up)
+                results_table,event_table=evaluate_historical_weights(historical,min_events=3,min_golfers=15)
+                st.write("In-sample fixed allocation comparison (no fitting on outcomes)")
+                st.dataframe(results_table[["scenario","events","golfers","rmse","mae","bias","rmse_improvement_vs_baseline"]],hide_index=True,width="stretch")
+                st.download_button("Download event-level audit",event_table.to_csv(index=False),"pga_v111_weight_event_audit.csv","text/csv")
+                folds,holdout=rolling_out_of_sample(historical,min_train_events=3,min_golfers=15)
+                st.write("Chronological out-of-sample selection (earlier events only)")
+                st.json(holdout)
+                st.dataframe(folds,hide_index=True,width="stretch")
+                st.download_button("Download holdout audit",folds.to_csv(index=False),"pga_v111_weight_holdouts.csv","text/csv")
+                st.warning("These metrics test strokes-relative-to-par accuracy, not DK fantasy scoring or portfolio ROI. Confirm that snapshots were recorded before each event.")
+            except Exception as exc:
+                st.error(f"Historical calibration unavailable: {exc}")
     st.subheader("Current tournament outputs")
     st.dataframe(mc[[c for c in ["player","win_pct","top5_pct","top10_pct","make_cut_pct","expected_finish","dk_points_proxy"] if c in mc.columns]].head(25),width="stretch",hide_index=True)
     rp=st.session_state.get("round_parlay")
