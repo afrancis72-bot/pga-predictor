@@ -82,10 +82,15 @@ def build_pre_event_evidence(players, season_stats=None, event_results=None,
         e["date"] = pd.to_datetime(e["date"], errors="coerce", utc=True).dt.tz_localize(None)
         e = e[e["date"].notna() & (e["date"] < cutoff)].copy()
         e["event_key"] = e["event_id"].astype(str) if "event_id" in e else e["date"].dt.strftime("%Y-%m-%d")
-        # A row denotes a player/event, not individual hole or round.
-        # Multiple player/event rows are ambiguous, not safe for event-level SG.
-        if e.duplicated(["key", "event_key"]).any():
-            e = e.drop_duplicates(["key","event_key"],keep=False)
+        # A row denotes a player/event, not a round. If multiple records
+        # represent the latest tournament, preserve its date but refuse to
+        # mistake any one round for full-tournament SG.
+        duplicated = e.duplicated(["key", "event_key"], keep=False)
+        is_round = pd.to_numeric(e["round"], errors="coerce").notna() if "round" in e else pd.Series(False,index=e.index)
+        unreliable_sg = duplicated | is_round
+        for c in SG:
+            if c in e: e.loc[unreliable_sg,c] = np.nan
+        e = e.drop_duplicates(["key", "event_key"], keep="first")
         if "made_cut" in e:
             e["cut_bool"] = e["made_cut"].map(_parse_cut)
             valid = e[e["cut_bool"].notna()].copy()
