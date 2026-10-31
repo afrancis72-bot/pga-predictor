@@ -13,6 +13,8 @@ on:
       - "parlay_value_optimizer.py"
       - "reliability_features.py"
       - "pga_event_form.py"
+      - "pga_auto_history.py"
+      - "requirements.txt"
       - ".github/workflows/pga-integrity.yml"
   pull_request:
     paths:
@@ -26,6 +28,8 @@ on:
       - "parlay_value_optimizer.py"
       - "reliability_features.py"
       - "pga_event_form.py"
+      - "pga_auto_history.py"
+      - "requirements.txt"
       - ".github/workflows/pga-integrity.yml"
 jobs:
   integrity:
