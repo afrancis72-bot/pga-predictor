@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Iterable, Sequence, Callable
 import numpy as np
 import pandas as pd
+from pga_joint_portfolio import joint_candidate_metrics
 
 
 @dataclass
@@ -78,6 +79,9 @@ def optimize_portfolio(
     locks: Sequence[str] | None = None,
     excludes: Sequence[str] | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
+    scenario_scores: np.ndarray | None = None,
+    scenario_cuts: np.ndarray | None = None,
+    scenario_players: Sequence[str] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     settings = settings or PortfolioSettings()
     locks, excludes = set(locks or []), set(excludes or [])
@@ -169,7 +173,23 @@ def optimize_portfolio(
     if progress_callback:
         progress_callback(0.86, f"Selecting {settings.lineup_count} portfolio lineups…")
 
-    ranked = sorted([(v[0], v[1], k) for k, v in candidates.items()], reverse=True)
+    # A V11 tournament lineup MUST be evaluated in joint simulated outcomes.
+    # Summing independent golfer P90s, or merely averaging cut probabilities,
+    # is not the expected outcome of any real six-golfer tournament lineup.
+    has_any_scenarios = any(x is not None for x in (scenario_scores, scenario_cuts, scenario_players))
+    if has_any_scenarios and not all(x is not None for x in (scenario_scores, scenario_cuts, scenario_players)):
+        raise ValueError("PGA joint portfolio requires score draws, cut draws AND ordered player names")
+    if all(c in d.columns for c in ("v11_mean_dk", "v11_p90_dk")) and not has_any_scenarios:
+        raise ValueError("V11 PGA portfolio requires the original simulated tournament outcomes; rerun model setup")
+    joint = {}
+    if has_any_scenarios:
+        joint = joint_candidate_metrics(candidates.keys(), scenario_players, scenario_scores,
+                                       scenario_cuts, strategy=settings.strategy,
+                                       progress_callback=progress_callback)
+        ranked = sorted([(joint[k]["objective"] + 0.000010*(v[1]-settings.salary_floor),
+                          v[1], k) for k, v in candidates.items()], reverse=True)
+    else:
+        ranked = sorted([(v[0], v[1], k) for k, v in candidates.items()], reverse=True)
     if not ranked:
         raise RuntimeError("No feasible lineups found. Lower salary floor or relax locks/exclusions.")
 
@@ -206,7 +226,8 @@ def optimize_portfolio(
     rows, summaries = [], []
     for number, names in enumerate(selected, 1):
         lu = d[d.player.isin(names)].sort_values("salary", ascending=False)
-        summaries.append({
+        metrics = joint.get(names)
+        summary_row = {
             "lineup": number,
             "salary": int(lu.salary.sum()),
             "salary_left": settings.salary_cap - int(lu.salary.sum()),
@@ -214,7 +235,17 @@ def optimize_portfolio(
             "sum_top10_pct": float(lu.top10_pct.sum()),
             "avg_make_cut_pct": float(lu.make_cut_pct.mean()),
             "sum_dk_proxy": float(lu[dk_col].sum()),
-        })
+        }
+        if metrics is not None:
+            summary_row.update({
+                "simulated_lineup_mean": round(metrics["mean"], 2),
+                "simulated_lineup_p90": round(metrics["p90"], 2),
+                "simulated_lineup_p95": round(metrics["p95"], 2),
+                "simulated_lineup_p99": round(metrics["p99"], 2),
+                "simulated_six_of_six_pct": round(100.0 * metrics["six_of_six_probability"], 2),
+                "simulated_strategy_score": round(metrics["objective"], 2),
+            })
+        summaries.append(summary_row)
         for _, r in lu.iterrows():
             rows.append({
                 "lineup": number, "player": r.player, "salary": int(r.salary),
