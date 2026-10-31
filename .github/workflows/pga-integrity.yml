@@ -11,6 +11,7 @@ on:
       - "pages/2_PGA_Migrated_Model.py"
       - "tests/test_pga*.py"
       - "parlay_value_optimizer.py"
+      - "reliability_features.py"
       - ".github/workflows/pga-integrity.yml"
   pull_request:
     paths:
@@ -22,6 +23,7 @@ on:
       - "pages/2_PGA_Migrated_Model.py"
       - "tests/test_pga*.py"
       - "parlay_value_optimizer.py"
+      - "reliability_features.py"
       - ".github/workflows/pga-integrity.yml"
 jobs:
   integrity:
