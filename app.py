@@ -8,6 +8,7 @@ from international_ingestion import search_courses, geocode_course, location_det
 from portfolio_optimizer import PortfolioSettings, optimize_portfolio
 from pga_predictor_pro import Config, predict_from_dataframes
 from golf_first_v11 import simulate_golf_first
+from reliability_features import build_pre_event_evidence, apply_reliability_research, snapshot_last_events
 from round_parlay import fetch_groupings, normalize_groupings_upload, fetch_live_results, fetch_official_prior_rounds, normalize_live_results, build_round_ratings, simulate_groups, build_six_leg_tickets, golfchannel_round_url
 from parlay_value_optimizer import evaluate_prices, optimize_round_prices
 
@@ -390,6 +391,13 @@ if page == "🏠 Setup / Inputs":
         st.caption("Normally leave these alone. They are fallbacks for missing or custom data.")
         stats_up=st.file_uploader("player_stats.csv override",type="csv",key="setup_stats")
         results_up=st.file_uploader("results.csv override",type="csv",key="setup_results")
+        reliability_up=st.file_uploader("Optional pre-event cut history + last-event SG snapshot (single CSV)",type="csv",key="setup_reliability")
+        st.caption("Suggested headers: player, as_of, events_played, cuts_made, last_event_date, last_event_name, last_event_sg_ott, last_event_sg_approach, last_event_sg_arg, last_event_sg_putting. Historical snapshots MUST predate tournament lock. Missing data is not invented.")
+        template=pd.DataFrame(columns=["player","as_of","events_played","cuts_made","last_event_date",
+                 "last_event_name","last_event_sg_ott","last_event_sg_approach","last_event_sg_arg","last_event_sg_putting"])
+        st.download_button("Download reliability evidence CSV template",template.to_csv(index=False),
+                           "pga_pre_event_reliability_template.csv","text/csv")
+
         history_up=st.file_uploader("course_history.csv override",type="csv",key="setup_history")
         holes_up=st.file_uploader("course_holes.csv override",type="csv",key="setup_holes")
         weather_up=st.file_uploader("weather.csv override",type="csv",key="setup_weather")
@@ -437,8 +445,19 @@ if page == "🏠 Setup / Inputs":
                     weather_source="Open-Meteo"
                 else:
                     weather=pd.DataFrame(); weather_source="not supplied"
+                # A separately dated weekly snapshot is optional; never require new
+                # uploads or invent missing historical cut/shot-quality evidence.
+                weekly_evidence=pd.read_csv(reliability_up) if reliability_up is not None else pd.DataFrame()
+                cut_data=weekly_evidence if not weekly_evidence.empty else player_stats
+                last_event_data=snapshot_last_events(weekly_evidence) if not weekly_evidence.empty else pd.DataFrame()
+                if last_event_data.empty: last_event_data=results
+                reliability_evidence=build_pre_event_evidence(players,cut_data,last_event_data,
+                                         tournament_start=tournament_start)
                 with st.spinner(f"Running {int(sims):,} tournament simulations..."):
                     pred=predict_from_dataframes(Config(tournament=tournament_name,sims=int(sims),seed=int(sim_seed)),players,player_stats,results,history,holes,weather)
+                    pred=apply_reliability_research(pred,reliability_evidence,
+                            no_cut=tournament_format.startswith("No cut"))
+
                     hole_pars=None
                     if isinstance(holes,pd.DataFrame) and not holes.empty:
                         for par_col in ("par","Par","hole_par"):
@@ -469,7 +488,10 @@ if page == "🏠 Setup / Inputs":
                         "sims":int(sims),"seed":int(sim_seed),"prediction":pred,"selected_course":selected_course,
                         "v11_score_samples":dk_samples,"v11_made_cut_samples":cut_samples,
                         "v11_scenario_players":pred["player"].astype(str).tolist(),
-                        "v11_diagnostics":v11_diag,"tournament_format":tournament_format}
+                        "v11_diagnostics":v11_diag,"tournament_format":tournament_format,
+                        "reliability_evidence":reliability_evidence,
+                        "reliability_data_source":("uploaded dated pre-event snapshot" if not weekly_evidence.empty
+                                                   else "dated player-stats/results data when available")}
                 # A new tournament model invalidates any previously approved/generated portfolio.
                 st.session_state.dfs_portfolio=None
                 st.session_state.pga_bundle=bundle; st.session_state.prediction=pred
@@ -516,14 +538,35 @@ if page == "🏆 Tournament DFS":
         if results.empty or history.empty:
             st.warning("Recent-round or course-history data missing: model uses available OTIS skill data "
                        "and provisional assumptions. That does not certify historical accuracy.")
-        st.caption("Strokes-gained inputs and cut forecasts are not yet validated against a historical walk-forward sample.")
+        e=bundle.get("reliability_evidence",pd.DataFrame())
+        if not e.empty:
+            available=int(pd.to_numeric(e["season_starts"],errors="coerce").ge(8).sum())
+            complete=int(e["last_event_sg_complete"].fillna(False).sum())
+            st.write(f"Pre-event cut records (8+ events): {available}/{len(e)} golfers • "
+                     f"Complete previous-event four-category SG: {complete}/{len(e)}.")
+            if available < 10:
+                st.warning("Fewer than ten golfers have usable pre-event cuts data. "
+                           "The cut consistency adjustment is DISABLED (not imputed).")
+            if complete==0:
+                st.warning("No complete latest-event OTT/APP/ARG/PUTT data. "
+                           "No previous-event SG adjustments have been made.")
+            st.download_button("Download dated golfer reliability audit",mc[[c for c in [
+                "player","salary","season_cuts_made","season_starts","historical_cut_pct",
+                "shrunk_cut_pct","cut_record_as_of","cut_evidence_source","last_event_name",
+                "last_event_date","last_event_sg_ott","last_event_sg_approach",
+                "last_event_sg_arg","last_event_sg_putting","last_event_positive_categories",
+                "last_event_all_four_positive","cut_history_strokes_adjustment",
+                "four_category_strokes_adjustment","reliability_strokes_adjustment",
+                "make_cut_pct","v11_mean_dk"] if c in mc.columns]].to_csv(index=False),
+                "pga_pre_event_reliability_audit.csv","text/csv")
+        st.caption("Cut and prior-event SG adjustments are intentionally BOUNDED RESEARCH HEURISTICS, not historically calibrated improvements.")
     if bundle.get("v11_diagnostics", {}).get("hole_pars_source") == "generic provisional template":
         st.warning("PROVISIONAL COURSE: verified 18-hole par composition was unavailable. "
                    "The golf simulator used a generic course layout, NOT confirmed venue hole pars. "
                    "Treat DFS projections as experimental until course setup is verified.")
     tab1,tab2=st.tabs(["Model Rankings","Build Lineups"])
     with tab1:
-        display_cols=[c for c in ["player","salary","win_pct","top5_pct","top10_pct","top20_pct","make_cut_pct","expected_finish","v11_mean_dk","v11_median_dk","v11_p75_dk","v11_p90_dk","v11_p95_dk","v11_avg_birdies","v11_avg_bogeys","dk_points_proxy","course_fit_ceiling"] if c in mc.columns]
+        display_cols=[c for c in ["player","salary","season_starts","historical_cut_pct","shrunk_cut_pct","last_event_positive_categories","last_event_all_four_positive","reliability_strokes_adjustment","win_pct","top5_pct","top10_pct","top20_pct","make_cut_pct","expected_finish","v11_mean_dk","v11_median_dk","v11_p75_dk","v11_p90_dk","v11_p95_dk","v11_avg_birdies","v11_avg_bogeys","dk_points_proxy","course_fit_ceiling"] if c in mc.columns]
         sort_options=[c for c in ["v11_mean_dk","v11_p90_dk","win_pct","top10_pct","make_cut_pct","course_fit_ceiling","salary"] if c in mc.columns]
         sort_col=st.selectbox("Sort by",sort_options)
         st.dataframe(mc.sort_values(sort_col,ascending=(sort_col=="salary"))[display_cols],width="stretch",hide_index=True)
@@ -543,7 +586,18 @@ if page == "🏆 Tournament DFS":
                     scenario_scores=bundle.get("v11_score_samples"),
                     scenario_cuts=bundle.get("v11_made_cut_samples"),
                     scenario_players=bundle.get("v11_scenario_players"))
-                st.session_state.dfs_portfolio={"portfolio":portfolio,"summary":summary,"exposure":exposure}
+                # An exposure limit is not evidence a player deserved that risk.
+                review=exposure.merge(mc[[c for c in ["player","salary","season_starts",
+                    "historical_cut_pct","shrunk_cut_pct","last_event_all_four_positive",
+                    "last_event_positive_categories","make_cut_pct","reliability_strokes_adjustment"]
+                    if c in mc.columns]],on="player",how="left",validate="many_to_one")
+                review["review_flag"]=review.apply(
+                    lambda r: ("REVIEW: 25%+ exposure without 8+ documented prior cuts"
+                               if r.exposure_pct>=25 and (pd.isna(r.get("season_starts")) or r.season_starts<8)
+                               else "REVIEW: high portfolio concentration"
+                               if r.exposure_pct>=30 else ""),axis=1)
+                st.session_state.dfs_portfolio={"portfolio":portfolio,"summary":summary,
+                                                 "exposure":exposure,"reliability_review":review}
                 progress.empty()
                 st.success(f"Generated {len(summary)} lineups.")
             except Exception as exc:
@@ -553,7 +607,9 @@ if page == "🏆 Tournament DFS":
         po=st.session_state.get("dfs_portfolio")
         if po:
             st.dataframe(po["summary"],width="stretch",hide_index=True); st.dataframe(po["portfolio"],width="stretch",hide_index=True)
-            st.subheader("Exposure"); st.dataframe(po["exposure"],width="stretch",hide_index=True)
+            st.subheader("Exposure and reliability review")
+            st.dataframe(po.get("reliability_review",po["exposure"]),width="stretch",hide_index=True)
+            st.caption("An exposure warning prompts review; it does not claim to prove a golfer was a bad pick.")
             st.download_button("Download lineups CSV",po["portfolio"].to_csv(index=False),"pga_lineups.csv","text/csv")
             st.download_button("Download six-of-six and lineup simulation audit",
                                po["summary"].to_csv(index=False),
