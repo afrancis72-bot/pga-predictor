@@ -456,6 +456,9 @@ if page == "🏠 Setup / Inputs":
                     pred["expected_finish"]=pred["v11_expected_finish"]
                     pred["win_pct"]=pred["v11_win_pct"]/100.0
                     pred["model_rank"]=pred["expected_finish"].rank(method="min")
+                    # Include unmatched entrants when simulating cut lines, but do
+                    # NOT recommend them for real-money lineups without weekly skill data.
+                    pred["optimization_eligible"]=pred["player"].astype(str).str.strip().str.casefold().isin(onames)
                     pred["v11_gpp_objective"]=0.45*pred["v11_mean_dk"]+0.55*pred["v11_p90_dk"]
                     pred["v11_balanced_objective"]=0.80*pred["v11_mean_dk"]+0.20*pred["v11_p75_dk"]
                     pred["v11_cut_objective"]=0.85*pred["v11_mean_dk"]+0.15*pred["v11_p75_dk"]
@@ -503,6 +506,16 @@ if page == "🏆 Tournament DFS":
             f"{bundle.get('v11_diagnostics',{}).get('hole_pars_source','unknown hole pars')}. "
             "DK scoring from simulated golf; probabilities remain provisional until calibrated.")
     st.caption("V11 rankings (win/top-5/top-10/top-20, cut and expected finish) are reconciled from the same hole simulation.")
+    with st.expander("Input coverage and projection reliability"):
+        st.write(f"Weekly OTIS matched: {int(mc['optimization_eligible'].sum())}/{len(mc)} golfers; "
+                 "unmatched entrants remain in cut simulations but cannot enter DFS optimizer.")
+        st.write(f"Historical recent-round results loaded: {not results.empty} • "
+                 f"Historical course starts loaded: {not history.empty} • "
+                 f"Verified course-hole rows loaded: {len(holes)}")
+        if results.empty or history.empty:
+            st.warning("Recent-round or course-history data missing: model uses available OTIS skill data "
+                       "and provisional assumptions. That does not certify historical accuracy.")
+        st.caption("Strokes-gained inputs and cut forecasts are not yet validated against a historical walk-forward sample.")
     if bundle.get("v11_diagnostics", {}).get("hole_pars_source") == "generic provisional template":
         st.warning("PROVISIONAL COURSE: verified 18-hole par composition was unavailable. "
                    "The golf simulator used a generic course layout, NOT confirmed venue hole pars. "
