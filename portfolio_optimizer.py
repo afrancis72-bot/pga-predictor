@@ -94,6 +94,9 @@ def optimize_portfolio(
     d = d.dropna(subset=["player", "salary"]).copy()
     d["salary"] = pd.to_numeric(d["salary"], errors="coerce").astype(int)
     d = d[~d.player.isin(excludes)]
+    if "optimization_eligible" in d.columns:
+        eligible = d["optimization_eligible"].fillna(False).astype(bool)
+        d = d[eligible].copy()
     d = d[d["salary"] >= settings.min_player_salary].copy()
     if not locks.issubset(set(d.player)):
         missing = sorted(locks - set(d.player))
