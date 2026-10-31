@@ -16,7 +16,7 @@ import pandas as pd
 def american_decimal(odds):
     """Convert standard American odds into total-return decimal odds."""
     v = float(odds)
-    if not math.isfinite(v) or (-100 < v < 100) or v == -100:
+    if not math.isfinite(v) or (-100 < v < 100) :
         raise ValueError("Odds must be standard American prices, e.g. +150 or -110.")
     return (1.0 + v / 100.0) if v > 0 else (1.0 + 100.0 / abs(v))
 
@@ -151,7 +151,7 @@ def optimize_round_prices(priced: pd.DataFrame, *, ticket_count: int = 3,
                            (priced["stressed_edge_pp"] > 0)].copy()
     # A single golfer per 3-ball, selected by stressed value, not raw likelihood.
     qualified = (qualified.sort_values("stressed_roi", ascending=False)
-                 .drop_duplicates("group").head(14).reset_index(drop=True))
+                 .drop_duplicates("group").head(12).reset_index(drop=True))
     if qualified["group"].nunique() < 6:
         return {"decision": f"NO BET — {len(qualified)} of 6 minimum distinct groups clear the stress test",
                 "tickets": pd.DataFrame(), "four_leg_bets": pd.DataFrame(), "qualified_legs": qualified}
