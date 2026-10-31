@@ -211,6 +211,9 @@ def collect_pre_event_history(players, tournament_start, *,
     if not event_rows:
         return pd.DataFrame(),pd.DataFrame(),pd.DataFrame(logs)
     hits=pd.concat(event_rows,ignore_index=True)
+    # Use the exact submitted DK name for forecast joins, never a free-text
+    # fuzzy join or a different spelling returned by the source.
+    hits["player"]=hits["key"].map(names.set_index("key")["player"])
     # Reject colliding names/IDs rather than guess which golfer matches.
     ambiguities=hits.groupby("key").player_id.nunique()
     bad=set(ambiguities[ambiguities.gt(1)].index)
@@ -229,13 +232,26 @@ def collect_pre_event_history(players, tournament_start, *,
     # Build a list of latest three prior events per golfer. Scorecard API can
     # be slow; cap calls, record coverage, cache full result at caller.
     ordered=hits.sort_values(["date","event_id"],ascending=[False,False])
-    tasks=[]
+    # Round-robin request order: one event for EVERY golfer first, then
+    # second and third events. API budgets must not silently privilege
+    # alphabetically early surnames.
+    per_player={}
     for key,group in ordered.groupby("key"):
+        per_player[key]=[]
         for row in group.head(3).itertuples():
-            if int(row.completed_rounds) >= 2:
-                tasks.append((row.event_id,row.player_id,row.key,row.player,
-                              row.date,int(row.completed_rounds),bool(row.abnormal_conditions)))
+            if pd.notna(row.completed_rounds) and int(row.completed_rounds) >= 2:
+                per_player[key].append((row.event_id,row.player_id,row.key,row.player,
+                                         row.date,int(row.completed_rounds),bool(row.abnormal_conditions)))
+    tasks=[]
+    for pass_no in range(3):
+        for key in sorted(per_player):
+            if len(per_player[key]) > pass_no:
+                tasks.append(per_player[key][pass_no])
+    total_available_tasks=len(tasks)
     tasks=tasks[:max(0,int(max_sg_calls))]
+    if len(tasks) < total_available_tasks:
+        logs.append({"stage":"strokes_gained","status":"bounded",
+                     "detail":f"API budget retained {len(tasks)} of {total_available_tasks} eligible player-event requests; rest unavailable"})
     def get_stat(task):
         event_id,pid,key,player,dt,rounds,short=task
         try:
