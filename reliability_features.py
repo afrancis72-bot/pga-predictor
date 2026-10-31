@@ -81,7 +81,7 @@ def build_pre_event_evidence(players, season_stats=None, event_results=None,
     if not e.empty and {"key","date"}.issubset(e):
         e["date"] = pd.to_datetime(e["date"], errors="coerce", utc=True).dt.tz_localize(None)
         e = e[e["date"].notna() & (e["date"] < cutoff)].copy()
-        e["event_key"] = e["event_id"].astype(str) if "event_id" in e else e["date"].dt.strftime("%Y-%m-%d")
+        e["event_key"] = (e["event_id"].replace(r"^\s*$",np.nan,regex=True).fillna(e["date"].dt.strftime("%Y-%m-%d")).astype(str) if "event_id" in e else e["date"].dt.strftime("%Y-%m-%d"))
         # A row denotes a player/event, not a round. If multiple records
         # represent the latest tournament, preserve its date but refuse to
         # mistake any one round for full-tournament SG.
