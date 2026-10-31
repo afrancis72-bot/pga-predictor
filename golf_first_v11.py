@@ -166,7 +166,10 @@ def simulate_golf_first(projections:pd.DataFrame, sims:int=5000, seed:int=42,
     d['v11_p95_dk']=np.percentile(scores,95,axis=0)
     d['v11_sd_dk']=scores.std(axis=0)
     d['v11_win_pct']=(ranks==1).mean(axis=0)*100
+    d['v11_top5_pct']=(ranks<=5).mean(axis=0)*100
     d['v11_top10_pct']=(ranks<=10).mean(axis=0)*100
+    d['v11_top20_pct']=(ranks<=20).mean(axis=0)*100
+    d['v11_expected_finish']=np.where(made_cut,ranks, n+1).mean(axis=0)
     d['v11_make_cut_pct']=made_cut.mean(axis=0)*100.
     d['v11_avg_birdies']=birdies.mean(axis=0)
     d['v11_avg_eagles']=eagles.mean(axis=0)
