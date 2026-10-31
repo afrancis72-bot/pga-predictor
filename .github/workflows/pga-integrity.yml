@@ -1,0 +1,33 @@
+name: PGA simulator and portfolio integrity
+on:
+  push:
+    branches: [main]
+    paths:
+      - "golf_first_v11.py"
+      - "portfolio_optimizer.py"
+      - "pga_joint_portfolio.py"
+      - "app.py"
+      - "pga_engine/**"
+      - "pages/2_PGA_Migrated_Model.py"
+      - "tests/test_pga_integrity.py"
+      - ".github/workflows/pga-integrity.yml"
+  pull_request:
+    paths:
+      - "golf_first_v11.py"
+      - "portfolio_optimizer.py"
+      - "pga_joint_portfolio.py"
+      - "app.py"
+      - "pga_engine/**"
+      - "pages/2_PGA_Migrated_Model.py"
+      - "tests/test_pga_integrity.py"
+      - ".github/workflows/pga-integrity.yml"
+jobs:
+  integrity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install "numpy>=1.26" "pandas>=2.0" "scipy>=1.11"
+      - run: python -m unittest discover -s tests -p 'test_pga_integrity.py' -v
