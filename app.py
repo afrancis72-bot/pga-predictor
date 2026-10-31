@@ -602,6 +602,7 @@ st.caption(f"**{tournament_name}** • {course_query} • {len(players)} golfers
 
 if page == "🏆 Tournament DFS":
     st.header("🏆 Tournament DFS")
+    st.caption("PGA DFS build 2026-10-31 • exposure safeguard v2 • 20% default")
     c1,c2,c3,c4=st.columns(4); c1.metric("Field",len(mc)); c2.metric("Simulations",f"{sims:,}"); c3.metric("Salary cap","$50,000"); c4.metric("OTIS coverage",f"{bundle['otis_match_count']}/{len(players)}")
     st.info(f"V11 golf-first active • {bundle.get('tournament_format','format not specified')} • "
             f"{bundle.get('v11_diagnostics',{}).get('hole_pars_source','unknown hole pars')}. "
@@ -707,7 +708,7 @@ if page == "🏆 Tournament DFS":
                                 "kft_last5_wins","make_cut_pct","v11_mean_dk"]
                                 if c in disagreements]
             st.dataframe(disagreements[show],width="stretch",hide_index=True)
-        a,b,c,d=st.columns(4); lineup_count=a.number_input("Lineups",1,20,10); max_exposure=b.slider("Max exposure",.10,1.0,.20,.05); min_unique=c.number_input("Minimum unique golfers",1,5,3); salary_floor=d.number_input("Minimum lineup salary",40000,50000,46500,100)
+        a,b,c,d=st.columns(4); lineup_count=a.number_input("Lineups",1,20,10); max_exposure=b.slider("Max exposure",.10,1.0,.20,.05,key="pga_dfs_exposure_20261031_v2",help="For 10 lineups, 20% means at most 2 appearances per golfer. This is a newly versioned control and will not inherit the old saved 35% selection."); min_unique=c.number_input("Minimum unique golfers",1,5,3); salary_floor=d.number_input("Minimum lineup salary",40000,50000,46500,100)
         min_distinct=int(np.ceil(int(lineup_count)*6/max(1,int(np.floor(float(max_exposure)*int(lineup_count)+1e-9)))))
         st.caption(f"Portfolio risk: {int(lineup_count)*6} total roster spots, maximum "
                    f"{max(1,int(np.floor(float(max_exposure)*int(lineup_count)+1e-9)))} per golfer. "
