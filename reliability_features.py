@@ -147,6 +147,21 @@ def build_pre_event_evidence(players, season_stats=None, event_results=None,
         recs.append(row)
     return out.merge(pd.DataFrame(recs),on="key",how="left",validate="one_to_one").drop(columns="key")
 
+
+def snapshot_last_events(snapshot):
+    """Convert ONE optional weekly snapshot into complete previous-event SG rows."""
+    w=_clean(snapshot)
+    required={"player","last_event_date","last_event_sg_ott","last_event_sg_approach",
+              "last_event_sg_arg","last_event_sg_putting"}
+    if not required.issubset(w):
+        return pd.DataFrame()
+    ren={"last_event_date":"date", "last_event_name":"event_id",
+         **{f"last_event_{c}":c for c in SG}}
+    cols=list(required)+(["last_event_name"] if "last_event_name" in w else [])
+    result=w[cols].rename(columns=ren).copy()
+    if "event_id" not in result: result["event_id"]=result["date"]
+    return result
+
 def apply_reliability_research(projections, evidence, *, no_cut=False):
     """Bounded, explicit exploratory adjustments to expected strokes.
 
