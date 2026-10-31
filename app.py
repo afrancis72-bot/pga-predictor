@@ -10,6 +10,7 @@ from pga_predictor_pro import Config, predict_from_dataframes
 from golf_first_v11 import simulate_golf_first
 from reliability_features import build_pre_event_evidence, apply_reliability_research, snapshot_last_events
 from pga_event_form import attach_rolling_sg
+from pga_auto_history import collect_pre_event_history
 from round_parlay import fetch_groupings, normalize_groupings_upload, fetch_live_results, fetch_official_prior_rounds, normalize_live_results, build_round_ratings, simulate_groups, build_six_leg_tickets, golfchannel_round_url
 from parlay_value_optimizer import evaluate_prices, optimize_round_prices
 
@@ -17,6 +18,14 @@ ROOT = Path(__file__).resolve().parent
 st.set_page_config(page_title="PGA Predictor Pro", page_icon="⛳", layout="wide")
 st.title("⛳ PGA Predictor Pro — Unified Dashboard V10.9.5")
 st.caption("One setup page. Clean model pages. Transparent Course DNA.")
+
+@st.cache_data(ttl=21600,show_spinner=False)
+def cached_pga_auto_history(players_tuple, lock_date):
+    # Public PGA TOUR-facing API access is unofficial and may be unavailable.
+    # Cache the complete source batch; never mix datasets from different locks.
+    return collect_pre_event_history(
+        list(players_tuple),lock_date,lookback=38,
+        max_workers=4,max_sg_calls=360,min_field=60)
 
 @st.cache_data
 def load_repo_csv(name):
@@ -359,6 +368,15 @@ if page == "🏠 Setup / Inputs":
     players_up=u1.file_uploader("DraftKings PGA salary / field CSV",type="csv",key="setup_players")
     otis_fit_up=u2.file_uploader("OTIS — Advanced Course-Fit CSV",type="csv",key="setup_otis")
 
+    auto_history_enabled=st.checkbox(
+        "Automatically retrieve pre-event PGA cuts and recent four-category SG",
+        value=True,
+        help="Queries completed historical PGA TOUR events. First load can be slower. "
+             "Unverified or missing historical records are never invented. "
+             "Research forecasts remain uncalibrated.")
+    st.caption("Historical information comes from the public PGA TOUR browser-facing feed through "
+               "an unofficial client. Completed-event dates, cut statuses and full event SG "
+               "are checked before inclusion.")
     st.subheader("Automatic course & weather")
     c1,c2,c3=st.columns([1,1,1])
     country_hint=c1.text_input("Country / region hint",value=prev.get("country_hint",""),placeholder="Japan, Florida, Mexico...")
@@ -455,9 +473,22 @@ if page == "🏠 Setup / Inputs":
                 # A separately dated weekly snapshot is optional; never require new
                 # uploads or invent missing historical cut/shot-quality evidence.
                 weekly_evidence=pd.read_csv(reliability_up) if reliability_up is not None else pd.DataFrame()
-                cut_data=weekly_evidence if not weekly_evidence.empty else player_stats
+                auto_cuts,auto_event_sg,auto_history_audit=pd.DataFrame(),pd.DataFrame(),pd.DataFrame()
+                auto_history_error=""
+                if auto_history_enabled:
+                    try:
+                        with st.spinner("Fetching prior completed PGA events and four-category SG evidence…"):
+                            auto_cuts,auto_event_sg,auto_history_audit=cached_pga_auto_history(
+                                tuple(players.player.astype(str)),str(tournament_start))
+                    except Exception as api_exc:
+                        auto_history_error=f"{type(api_exc).__name__}: {str(api_exc)[:200]}"
+                        st.warning("Historical PGA data provider unavailable; model continues with "
+                                   "verified manual/available inputs, not invented cut history. "
+                                   +auto_history_error)
+                cut_data=(weekly_evidence if not weekly_evidence.empty
+                          else auto_cuts if not auto_cuts.empty else player_stats)
                 last_event_data=snapshot_last_events(weekly_evidence) if not weekly_evidence.empty else pd.DataFrame()
-                event_rows=[v for v in (results,last_event_data) if not v.empty]
+                event_rows=[v for v in (results,auto_event_sg,last_event_data) if not v.empty]
                 complete_event_history=pd.concat(event_rows,ignore_index=True) if event_rows else pd.DataFrame()
                 reliability_evidence=build_pre_event_evidence(players,cut_data,complete_event_history,
                                          tournament_start=tournament_start)
@@ -501,7 +532,12 @@ if page == "🏠 Setup / Inputs":
                         "v11_diagnostics":v11_diag,"tournament_format":tournament_format,
                         "reliability_evidence":reliability_evidence,
                         "reliability_data_source":("uploaded dated pre-event snapshot" if not weekly_evidence.empty
-                                                   else "dated player-stats/results data when available")}
+                                                   else "automated completed-event PGA source" if not auto_cuts.empty or not auto_event_sg.empty
+                                                   else "dated player-stats/results data when available"),
+                        "auto_history_cuts":auto_cuts,
+                        "auto_history_events":auto_event_sg,
+                        "auto_history_audit":auto_history_audit,
+                        "auto_history_error":auto_history_error}
                 # A new tournament model invalidates any previously approved/generated portfolio.
                 st.session_state.dfs_portfolio=None
                 st.session_state.pga_bundle=bundle; st.session_state.prediction=pred
@@ -518,6 +554,18 @@ if page == "🏠 Setup / Inputs":
         q3.metric("OTIS",f"{b['otis_match_count']}/{len(b['players'])} ✓")
         q4.metric("Weather",("Auto ✓" if b["weather_source"]=="Open-Meteo" else b["weather_source"]))
         q5.metric("Course",b["holes_source"])
+        st.caption(f"Historical source: {b.get('reliability_data_source','unavailable')} • "
+                   f"Auto cuts: {len(b.get('auto_history_cuts',[]))} golfers • "
+                   f"Auto SG events: {len(b.get('auto_history_events',[]))}.")
+        if b.get("auto_history_error"):
+            st.warning("PGA historical source unavailable: "+b["auto_history_error"])
+        audit=b.get("auto_history_audit",pd.DataFrame())
+        if not audit.empty:
+            with st.expander("Automatic historical source audit",expanded=False):
+                st.dataframe(audit,width="stretch",hide_index=True)
+                st.download_button("Download PGA historical source audit",
+                      audit.to_csv(index=False),"pga_historical_provider_audit.csv","text/csv")
+
         st.success("Setup is stored for this session. Use the sidebar to go directly to DFS, Round Parlays, Course DNA, or Results.")
     st.stop()
 
@@ -574,6 +622,7 @@ if page == "🏆 Tournament DFS":
                 "four_category_strokes_adjustment","reliability_strokes_adjustment",
                 "make_cut_pct","v11_mean_dk"] if c in mc.columns]].to_csv(index=False),
                 "pga_pre_event_reliability_audit.csv","text/csv")
+        st.caption("Historical source: "+str(bundle.get("reliability_data_source","not available")))
         st.caption("Cut and prior-event SG adjustments are intentionally BOUNDED RESEARCH HEURISTICS, not historically calibrated improvements.")
     if bundle.get("v11_diagnostics", {}).get("hole_pars_source") == "generic provisional template":
         st.warning("PROVISIONAL COURSE: verified 18-hole par composition was unavailable. "
