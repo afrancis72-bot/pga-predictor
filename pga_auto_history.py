@@ -24,7 +24,7 @@ COMPLETED = {"COMPLETED", "FINAL", "OFFICIAL", "COMPLETE"}
 FINISHED = re.compile(r"^(?:T)?[1-9][0-9]*$")
 MISSED = {"MC", "CUT", "MISSED CUT", "MISSED_CUT"}
 SKIP = {"WD", "W/D", "DQ", "DNS", "MDF", "WITHDRAWN", "DISQUALIFIED"}
-EVENT_ID = re.compile(r"^R20[0-9]{5}$")
+EVENT_ID = re.compile(r"^[RH]20[0-9]{5}$")
 
 
 def _key(value):
@@ -55,7 +55,7 @@ def validate_completed_events(schedule, cutoff, *, lookback=38):
     for rec in schedule.to_dict("records"):
         event_id = str(rec.get("tournament_id") or "")
         status = str(rec.get("status") or "").strip().upper()
-        year = int(rec.get("year") or event_id[1:5]) if EVENT_ID.fullmatch(event_id) else cutoff.year
+        year = int(event_id[1:5]) if EVENT_ID.fullmatch(event_id) else cutoff.year
         end = _display_end(rec.get("display_date"), year)
         reason = ""
         if not EVENT_ID.fullmatch(event_id): reason = "invalid event id"
@@ -68,11 +68,15 @@ def validate_completed_events(schedule, cutoff, *, lookback=38):
             continue
         rows.append({"event_id": event_id, "name": str(rec.get("tournament_name") or ""),
                      "end_date": pd.Timestamp(end).tz_localize(None).normalize(),
-                     "event_status": status})
+                     "event_status": status,"source_tour":event_id[0]})
     events = pd.DataFrame(rows)
     if events.empty:return events, skipped
     events = events.sort_values("end_date", ascending=False).drop_duplicates("event_id")
-    return events.head(int(lookback)).reset_index(drop=True), skipped
+    # Balance PGA TOUR and Korn Ferry TOUR event coverage; one schedule must
+    # not crowd the other out simply because it has more recent events.
+    events=(events.groupby("source_tour",group_keys=False)
+            .head(max(1,int(lookback))))
+    return events.sort_values("end_date",ascending=False).reset_index(drop=True), skipped
 
 
 def normalize_leaderboard(leaderboard, event, *, min_field=60):
@@ -99,6 +103,8 @@ def normalize_leaderboard(leaderboard, event, *, min_field=60):
     x["key"] = x["player"].map(_key)
     x["date"] = event["end_date"].strftime("%Y-%m-%d")
     x["event_id"] = event["event_id"]
+    x["source_tour"] = event["event_id"][0]
+    x["finish_position"] = x["position"].str.extract(r"^T?([0-9]+)$",expand=False).astype(float)
     x["event_name"] = event["name"]
     rounds = []
     for col in ("round_1","round_2","round_3","round_4"):
@@ -176,13 +182,18 @@ def collect_pre_event_history(players, tournament_start, *,
     years=(cutoff.year-1,cutoff.year)
     schedules=[]; errors=[]
     for year in years:
-        try:
-            schedule=provider.pga_schedule(year,"R")
-            if schedule is not None and not schedule.empty:
-                schedules.append(schedule.copy())
-            else:errors.append(f"{year}: empty season schedule")
-        except Exception as exc:
-            errors.append(f"{year}: schedule {type(exc).__name__}: {str(exc)[:100]}")
+        for tour in ("R","H"):
+            try:
+                schedule=provider.pga_schedule(year,tour)
+                if schedule is not None and not schedule.empty:
+                    source=schedule.copy()
+                    source["data_tour"]=tour
+                    # Provider can have ambiguous or missing schedule IDs.
+                    source=source[source["tournament_id"].astype(str).str.startswith(tour)]
+                    schedules.append(source)
+                else:errors.append(f"{tour}/{year}: empty season schedule")
+            except Exception as exc:
+                errors.append(f"{tour}/{year}: schedule {type(exc).__name__}: {str(exc)[:100]}")
     if not schedules:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(
             [{"stage":"schedule","status":"unavailable","detail":"; ".join(errors)}])
@@ -221,16 +232,39 @@ def collect_pre_event_history(players, tournament_start, *,
         hits=hits[~hits.key.isin(bad)]
         logs.append({"stage":"identity","status":"excluded",
                      "detail":f"{len(bad)} ambiguous golfer identity matches"})
-    # Include only current-season starts in historical cut rate, matching
-    # typical published season cuts-made/starts. Prior-year events only feed SG.
+    # Separate PGA TOUR cut history from Korn Ferry TOUR. The event cut
+    # thresholds and opponent strength differ, so never combine win/cut rates
+    # or use raw Korn Ferry cut percentages as equivalent PGA calibration.
     season=hits[pd.to_datetime(hits.date).dt.year.eq(cutoff.year)].copy()
-    snapshot=(season.groupby("key",as_index=False)
-              .agg(events_played=("made_cut","size"),cuts_made=("made_cut","sum"),
-                   as_of=("date","max")))
-    snapshot=snapshot.merge(names,on="key",how="left")
-    snapshot=snapshot[["player","events_played","cuts_made","as_of"]]
+    pga=season[season.source_tour.eq("R")]
+    kft=season[season.source_tour.eq("H")]
+    pga_cut=(pga.groupby("key",as_index=False)
+             .agg(events_played=("made_cut","size"),cuts_made=("made_cut","sum"),
+                  as_of=("date","max")))
+    kft_cut=(kft.groupby("key",as_index=False)
+             .agg(kft_starts=("made_cut","size"),kft_cuts_made=("made_cut","sum"),
+                  kft_as_of=("date","max")))
+    # Recent high finishes serve as an *independent review flag* for crossing
+    # tours; a Korn Ferry T9 is not assumed to equal a PGA T9.
+    shortlist=[]
+    for key,g in hits[hits.source_tour.eq("H")].sort_values("date",ascending=False).groupby("key"):
+        top=g.head(5)
+        rank=pd.to_numeric(top.finish_position,errors="coerce")
+        shortlist.append({"key":key,"kft_last5_top25":int(rank.le(25).sum()),
+                          "kft_last5_top10":int(rank.le(10).sum()),
+                          "kft_last5_wins":int(rank.eq(1).sum()),
+                          "kft_last5_events":len(top),
+                          "kft_review_candidate":bool(len(top)>=3 and rank.le(25).sum()>=3)})
+    shortlist=pd.DataFrame(shortlist)
+    snapshot=names.merge(pga_cut,on="key",how="left",validate="one_to_one")
+    snapshot=snapshot.merge(kft_cut,on="key",how="left",validate="one_to_one")
+    if not shortlist.empty:
+        snapshot=snapshot.merge(shortlist,on="key",how="left",validate="one_to_one")
+    snapshot=snapshot.drop(columns="key")
     # Build a list of latest three prior events per golfer. Scorecard API can
     # be slow; cap calls, record coverage, cache full result at caller.
+    # Retain event tour attribution; do not conflate Korn Ferry and PGA
+    # statistical performance in the DFS simulation.
     ordered=hits.sort_values(["date","event_id"],ascending=[False,False])
     # Round-robin request order: one event for EVERY golfer first, then
     # second and third events. API budgets must not silently privilege
@@ -259,6 +293,7 @@ def collect_pre_event_history(players, tournament_start, *,
             vals=normalize_event_sg(raw,completed_rounds=rounds)
             if vals is None:return None, f"{event_id}/{pid}: SG unavailable/incomplete"
             return {"player":player,"date":dt,"event_id":event_id,
+                    "source_tour":event_id[0],
                     "made_cut":None,"completed_rounds":rounds,
                     "scheduled_rounds":4,"abnormal_conditions":short,
                     "sg_source":"PGA_TOUR_EVENT_SCORECARD_AGGREGATE_PER_ROUND",
@@ -278,7 +313,8 @@ def collect_pre_event_history(players, tournament_start, *,
     if not sg.empty:
         sg=sg.sort_values(["player","date"],ascending=[True,False]).reset_index(drop=True)
     logs.append({"stage":"summary","status":"completed",
-                 "detail":f"Cut evidence: {len(snapshot)} golfers; "
+                 "detail":f"PGA cut records: {int(pga_cut.events_played.sum()) if not pga_cut.empty else 0}; "
+                          f"Korn Ferry cut records (separate): {int(kft_cut.kft_starts.sum()) if not kft_cut.empty else 0}; "
                           f"SG complete events: {len(sg)}; "
                           f"SG requests: {len(tasks)}; pre-lock schedule end proxy"})
     return snapshot,sg,pd.DataFrame(logs)
