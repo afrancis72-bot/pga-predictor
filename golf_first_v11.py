@@ -19,12 +19,15 @@ FINISH = [(1,30),(2,20),(3,18),(4,16),(5,14),(6,12),(7,10),(8,9),(9,8),(10,7),
 def simulate_golf_first(projections:pd.DataFrame, sims:int=5000, seed:int=42,
                         course_par:int=71, no_cut:bool=True, cut_size:int=65,
                         hole_pars:list[int]|None=None,
-                        round_field_mean_to_par:float=-1.5):
+                        round_field_mean_to_par:float=-1.5,
+                        return_cut_draws:bool=False):
     """Return player summary, full DK outcomes (sim x player), and diagnostics.
 
     Assumptions: 'expected_round' in V10 is field-centered, NOT absolute strokes.
     Generic hole pars are provisional and must be replaced with verified course holes.
     Baseline probabilities are illustrative, NOT fitted to real hole-level data.
+    return_cut_draws=True also returns the scenario-by-player cut matrix for
+    joint six-golfer lineup optimization (columns match the returned player rows).
     """
     if sims < 100 or sims > 100000: raise ValueError('sims must be 100..100000')
     if not no_cut and cut_size < 1: raise ValueError('cut_size must be positive')
@@ -33,6 +36,7 @@ def simulate_golf_first(projections:pd.DataFrame, sims:int=5000, seed:int=42,
         if c not in d: raise ValueError(f'Missing {c}')
     if d.player.duplicated().any(): raise ValueError('Duplicate golfers')
     n=len(d)
+    generic_holes = hole_pars is None
     if hole_pars is None:
         # Generic hole layout, provisional until verified pars are uploaded.
         n3,n5=4,3
@@ -69,13 +73,18 @@ def simulate_golf_first(projections:pd.DataFrame, sims:int=5000, seed:int=42,
     birdie_bias=np.clip(.10*birdie_proxy.to_numpy(),-.2,.2)
     golfer_mu=pd.to_numeric(d.expected_round,errors='coerce').fillna(0).to_numpy()+round_field_mean_to_par
     golfer_sd=pd.to_numeric(d.round_sd,errors='coerce').fillna(2.7).clip(1.7,4.5).to_numpy()
+    # Apply measured per-golfer round variability to each hole's scoring
+    # distribution. Tempering the categorical probabilities adjusts tails;
+    # the separate root solve below re-centers expected strokes independently.
+    # Until calibrated against actual round scores, this is a bounded heuristic.
+    scoring_temperature=np.clip(golfer_sd/2.7,0.72,1.40)
     # Solve each golfer's probability tilt against desired strokes to par.
     shifts=np.zeros(n)
     for i in range(n):
         left,right=-5.,5.
         for _ in range(38):
             m=(left+right)/2
-            logit=raw-common*REL-m*REL
+            logit=(raw-common*REL)/scoring_temperature[i]-m*REL
             logit[:,2]+=birdie_bias[i]
             logit[:,3]-=birdie_bias[i]*.5
             if expected_rel(logit).sum()>golfer_mu[i]:left=m
@@ -97,7 +106,9 @@ def simulate_golf_first(projections:pd.DataFrame, sims:int=5000, seed:int=42,
     # reproducible outcomes and avoids allocating a sims*n*72*7 tensor.
     for j in range(n):
         for r in range(4):
-            logits=raw[None,:,:]-(common+shifts[j]+latent[:,j,None]+day_shock[:,r,None])[:,:,None]*REL[None,None,:]
+            # Same tempered probabilities used in the mean-reconciliation
+            # solve above; apply golfer / shared-day effects as stroke tilts.
+            logits=((raw-common*REL)/scoring_temperature[j])[None,:,:]-(shifts[j]+latent[:,j,None]+day_shock[:,r,None])[:,:,None]*REL[None,None,:]
             logits=np.broadcast_to(logits,(sims,18,7)).copy()
             logits[:,:,2]+=birdie_bias[j]
             logits[:,:,3]-=birdie_bias[j]*.5
@@ -164,8 +175,11 @@ def simulate_golf_first(projections:pd.DataFrame, sims:int=5000, seed:int=42,
     d['v11_avg_streak_rounds']=streaks.mean(axis=0)
     d['v11_avg_bogeyfree_rounds']=bogeyfree.mean(axis=0)
     d['v11_salary_value']=d.v11_mean_dk/(pd.to_numeric(d.salary)/1000)
-    return d,scores,{'sims':sims,'no_cut':bool(no_cut),'cut_size':None if no_cut else int(cut_size),'par':course_par,
+    diagnostics={'sims':sims,'no_cut':bool(no_cut),'cut_size':None if no_cut else int(cut_size),'par':course_par,
                      'field_mean_to_par_assumption':round_field_mean_to_par,
-                     'hole_pars_source':'provided course hole pars' if hole_pars is not None else 'generic provisional template',
-                     'probability_source':'illustrative baseline, not calibrated to Yokohama hole-level stats',
-                     'golfer_count':n}
+                     'hole_pars_source':'provided course hole pars' if hole_pars is not None and not generic_holes else 'generic provisional template',
+                     'probability_source':'illustrative hole-scoring rates; golfer-specific variance is uncalibrated',
+                     'golfer_count':n, 'golfer_sd_used':True}
+    if return_cut_draws:
+        return d, scores, diagnostics, made_cut
+    return d, scores, diagnostics
