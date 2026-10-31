@@ -567,10 +567,21 @@ if page == "🏆 Tournament DFS":
     tab1,tab2=st.tabs(["Model Rankings","Build Lineups"])
     with tab1:
         display_cols=[c for c in ["player","salary","season_starts","historical_cut_pct","shrunk_cut_pct","last_event_positive_categories","last_event_all_four_positive","reliability_strokes_adjustment","win_pct","top5_pct","top10_pct","top20_pct","make_cut_pct","expected_finish","v11_mean_dk","v11_median_dk","v11_p75_dk","v11_p90_dk","v11_p95_dk","v11_avg_birdies","v11_avg_bogeys","dk_points_proxy","course_fit_ceiling"] if c in mc.columns]
-        sort_options=[c for c in ["v11_mean_dk","v11_p90_dk","win_pct","top10_pct","make_cut_pct","course_fit_ceiling","salary"] if c in mc.columns]
+        sort_options=[c for c in ["v11_mean_dk","v11_p90_dk","win_pct","top10_pct","make_cut_pct","shrunk_cut_pct","last_event_positive_categories","course_fit_ceiling","salary"] if c in mc.columns]
         sort_col=st.selectbox("Sort by",sort_options)
         st.dataframe(mc.sort_values(sort_col,ascending=(sort_col=="salary"))[display_cols],width="stretch",hide_index=True)
         st.download_button("Download projections",mc.to_csv(index=False),f"{tournament_name.replace(' ','_')}_projections.csv","text/csv")
+        four=mc[mc["last_event_all_four_positive"].fillna(False).astype(bool)].copy()
+        with st.expander(f"Latest tournament: positive SG in all four areas ({len(four)} golfers)",expanded=False):
+            if four.empty:
+                st.info("No fully verified all-four-positive previous-event records are loaded. This is not evidence that nobody qualifies.")
+            else:
+                st.dataframe(four[[c for c in ["player","salary","last_event_name","last_event_date",
+                           "last_event_sg_ott","last_event_sg_approach","last_event_sg_arg",
+                           "last_event_sg_putting","historical_cut_pct","make_cut_pct","v11_mean_dk"]
+                           if c in four.columns]].sort_values("v11_mean_dk",ascending=False),
+                           width="stretch",hide_index=True)
+
     with tab2:
         a,b,c,d=st.columns(4); lineup_count=a.number_input("Lineups",1,20,10); max_exposure=b.slider("Max exposure",.10,1.0,.50,.05); min_unique=c.number_input("Minimum unique golfers",1,5,3); salary_floor=d.number_input("Minimum lineup salary",40000,50000,46500,100)
         min_player_salary=st.number_input("Minimum golfer salary",6000,10000,6500,100); strategy=st.selectbox("Strategy",["GPP Ceiling","Balanced / Single Entry","Cut Equity"])
