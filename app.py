@@ -488,12 +488,24 @@ if page == "🏠 Setup / Inputs":
                 cut_data=(weekly_evidence if not weekly_evidence.empty
                           else auto_cuts if not auto_cuts.empty else player_stats)
                 last_event_data=snapshot_last_events(weekly_evidence) if not weekly_evidence.empty else pd.DataFrame()
-                event_rows=[v for v in (results,auto_event_sg,last_event_data) if not v.empty]
+                # We gather both PGA TOUR and Korn Ferry TOUR information,
+                # but do NOT apply raw Korn Ferry SG or cut rates as though
+                # they were PGA TOUR equivalents. Expose their strong-form
+                # contenders for comparison and independent manual review.
+                auto_pga_sg=(auto_event_sg.loc[auto_event_sg["source_tour"].eq("R")].copy()
+                             if not auto_event_sg.empty and "source_tour" in auto_event_sg else pd.DataFrame())
+                event_rows=[v for v in (results,auto_pga_sg,last_event_data) if not v.empty]
                 complete_event_history=pd.concat(event_rows,ignore_index=True) if event_rows else pd.DataFrame()
                 reliability_evidence=build_pre_event_evidence(players,cut_data,complete_event_history,
                                          tournament_start=tournament_start)
                 reliability_evidence=attach_rolling_sg(reliability_evidence,
                                          complete_event_history,tournament_start)
+                kft_cols=[c for c in ["player","kft_starts","kft_cuts_made","kft_as_of",
+                    "kft_last5_top25","kft_last5_top10","kft_last5_wins","kft_last5_events",
+                    "kft_review_candidate"] if c in auto_cuts.columns]
+                if len(kft_cols)>1:
+                    reliability_evidence=reliability_evidence.merge(auto_cuts[kft_cols],
+                                               on="player",how="left",validate="one_to_one")
                 with st.spinner(f"Running {int(sims):,} tournament simulations..."):
                     pred=predict_from_dataframes(Config(tournament=tournament_name,sims=int(sims),seed=int(sim_seed)),players,player_stats,results,history,holes,weather)
                     pred=apply_reliability_research(pred,reliability_evidence,
@@ -618,11 +630,24 @@ if page == "🏆 Tournament DFS":
                 "last_event_all_four_positive","recent_complete_sg_events","recent_disrupted_events",
                 "recent_rolling_positive_categories","recent_all_four_positive","recent_min_component_sg",
                 "recent_weighted_sg_ott","recent_weighted_sg_approach","recent_weighted_sg_arg",
-                "recent_weighted_sg_putting","cut_history_strokes_adjustment",
+                "recent_weighted_sg_putting","kft_starts","kft_cuts_made","kft_last5_events",
+                "kft_last5_top25","kft_last5_top10","kft_last5_wins",
+                "kft_review_candidate","cut_history_strokes_adjustment",
                 "four_category_strokes_adjustment","reliability_strokes_adjustment",
                 "make_cut_pct","v11_mean_dk"] if c in mc.columns]].to_csv(index=False),
                 "pga_pre_event_reliability_audit.csv","text/csv")
         st.caption("Historical source: "+str(bundle.get("reliability_data_source","not available")))
+        if "kft_review_candidate" in mc:
+            kft_watch=mc.loc[mc["kft_review_candidate"].fillna(False).astype(bool)].copy()
+            st.write(f"Korn Ferry TOUR emerging-form golfers flagged for review: {len(kft_watch)}.")
+            if not kft_watch.empty:
+                cols=[c for c in ["player","salary","kft_last5_events","kft_last5_top25",
+                       "kft_last5_top10","kft_last5_wins","kft_starts","kft_cuts_made",
+                       "make_cut_pct","v11_mean_dk"] if c in kft_watch.columns]
+                st.dataframe(kft_watch[cols].sort_values(["kft_last5_top25","kft_last5_wins"],
+                                     ascending=False),width="stretch",hide_index=True)
+        st.caption("PGA TOUR and Korn Ferry stats are tracked separately. A strong Korn Ferry record "
+                   "generates a review flag, not a fabricated PGA TOUR projection bonus.")
         st.caption("Cut and prior-event SG adjustments are intentionally BOUNDED RESEARCH HEURISTICS, not historically calibrated improvements.")
     if bundle.get("v11_diagnostics", {}).get("hole_pars_source") == "generic provisional template":
         st.warning("PROVISIONAL COURSE: verified 18-hole par composition was unavailable. "
@@ -665,7 +690,12 @@ if page == "🏆 Tournament DFS":
             st.download_button("Download multi-event form audit",research.to_csv(index=False),
                                "pga_last_three_event_form_audit.csv","text/csv")
     with tab2:
-        a,b,c,d=st.columns(4); lineup_count=a.number_input("Lineups",1,20,10); max_exposure=b.slider("Max exposure",.10,1.0,.50,.05); min_unique=c.number_input("Minimum unique golfers",1,5,3); salary_floor=d.number_input("Minimum lineup salary",40000,50000,46500,100)
+        a,b,c,d=st.columns(4); lineup_count=a.number_input("Lineups",1,20,10); max_exposure=b.slider("Max exposure",.10,1.0,.20,.05); min_unique=c.number_input("Minimum unique golfers",1,5,3); salary_floor=d.number_input("Minimum lineup salary",40000,50000,46500,100)
+        min_distinct=int(np.ceil(int(lineup_count)*6/max(1,int(np.floor(float(max_exposure)*int(lineup_count)+1e-9)))))
+        st.caption(f"Portfolio risk: {int(lineup_count)*6} total roster spots, maximum "
+                   f"{max(1,int(np.floor(float(max_exposure)*int(lineup_count)+1e-9)))} per golfer. "
+                   f"This cap requires at least {min_distinct} unique golfers. "
+                   "Do not raise exposure solely to force a weak value pick.")
         min_player_salary=st.number_input("Minimum golfer salary",6000,10000,6500,100); strategy=st.selectbox("Strategy",["GPP Ceiling","Balanced / Single Entry","Cut Equity"])
         names=sorted(mc.player.dropna().astype(str).unique()); locks=st.multiselect("Lock golfers",names); excludes=st.multiselect("Exclude golfers",[n for n in names if n not in locks])
         if st.button("Generate portfolio",type="primary"):
@@ -681,7 +711,8 @@ if page == "🏆 Tournament DFS":
                     scenario_players=bundle.get("v11_scenario_players"))
                 # An exposure limit is not evidence a player deserved that risk.
                 review=exposure.merge(mc[[c for c in ["player","salary","season_starts",
-                    "historical_cut_pct","shrunk_cut_pct","last_event_all_four_positive",
+                    "historical_cut_pct","shrunk_cut_pct","kft_last5_events",
+                    "kft_last5_top25","kft_review_candidate","last_event_all_four_positive",
                     "last_event_positive_categories","make_cut_pct","reliability_strokes_adjustment"]
                     if c in mc.columns]],on="player",how="left",validate="many_to_one")
                 review["review_flag"]=review.apply(
@@ -702,7 +733,8 @@ if page == "🏆 Tournament DFS":
             st.dataframe(po["summary"],width="stretch",hide_index=True); st.dataframe(po["portfolio"],width="stretch",hide_index=True)
             st.subheader("Exposure and reliability review")
             st.dataframe(po.get("reliability_review",po["exposure"]),width="stretch",hide_index=True)
-            st.caption("An exposure warning prompts review; it does not claim to prove a golfer was a bad pick.")
+            st.caption("An exposure warning prompts review; it does not claim to prove a golfer was a bad pick. "
+                       "Promising Korn Ferry form is shown separately until its transfer to PGA TOUR scoring is calibrated.")
             st.download_button("Download lineups CSV",po["portfolio"].to_csv(index=False),"pga_lineups.csv","text/csv")
             st.download_button("Download six-of-six and lineup simulation audit",
                                po["summary"].to_csv(index=False),
