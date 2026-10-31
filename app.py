@@ -9,6 +9,7 @@ from portfolio_optimizer import PortfolioSettings, optimize_portfolio
 from pga_predictor_pro import Config, predict_from_dataframes
 from golf_first_v11 import simulate_golf_first
 from reliability_features import build_pre_event_evidence, apply_reliability_research, snapshot_last_events
+from pga_event_form import attach_rolling_sg
 from round_parlay import fetch_groupings, normalize_groupings_upload, fetch_live_results, fetch_official_prior_rounds, normalize_live_results, build_round_ratings, simulate_groups, build_six_leg_tickets, golfchannel_round_url
 from parlay_value_optimizer import evaluate_prices, optimize_round_prices
 
@@ -393,6 +394,12 @@ if page == "🏠 Setup / Inputs":
         results_up=st.file_uploader("results.csv override",type="csv",key="setup_results")
         reliability_up=st.file_uploader("Optional pre-event cut history + last-event SG snapshot (single CSV)",type="csv",key="setup_reliability")
         st.caption("Suggested headers: player, as_of, events_played, cuts_made, last_event_date, last_event_name, last_event_sg_ott, last_event_sg_approach, last_event_sg_arg, last_event_sg_putting. Historical snapshots MUST predate tournament lock. Missing data is not invented.")
+        st.caption("For a 2–3 event form trend, upload a dated event-history CSV in the Results override below: player, date, event_id, sg_ott, sg_approach, sg_arg, sg_putting, made_cut. Optional: abnormal_conditions, scheduled_rounds, completed_rounds. Weather-disrupted or shortened rounds are excluded from short-form stability scoring.")
+        rolling_template=pd.DataFrame(columns=["player","date","event_id","sg_ott","sg_approach",
+                               "sg_arg","sg_putting","made_cut","abnormal_conditions",
+                               "scheduled_rounds","completed_rounds"])
+        st.download_button("Download last-3-event SG history template",
+                           rolling_template.to_csv(index=False),"pga_event_sg_history_template.csv","text/csv")
         template=pd.DataFrame(columns=["player","as_of","events_played","cuts_made","last_event_date",
                  "last_event_name","last_event_sg_ott","last_event_sg_approach","last_event_sg_arg","last_event_sg_putting"])
         st.download_button("Download reliability evidence CSV template",template.to_csv(index=False),
@@ -450,9 +457,12 @@ if page == "🏠 Setup / Inputs":
                 weekly_evidence=pd.read_csv(reliability_up) if reliability_up is not None else pd.DataFrame()
                 cut_data=weekly_evidence if not weekly_evidence.empty else player_stats
                 last_event_data=snapshot_last_events(weekly_evidence) if not weekly_evidence.empty else pd.DataFrame()
-                if last_event_data.empty: last_event_data=results
-                reliability_evidence=build_pre_event_evidence(players,cut_data,last_event_data,
+                event_rows=[v for v in (results,last_event_data) if not v.empty]
+                complete_event_history=pd.concat(event_rows,ignore_index=True) if event_rows else pd.DataFrame()
+                reliability_evidence=build_pre_event_evidence(players,cut_data,complete_event_history,
                                          tournament_start=tournament_start)
+                reliability_evidence=attach_rolling_sg(reliability_evidence,
+                                         complete_event_history,tournament_start)
                 with st.spinner(f"Running {int(sims):,} tournament simulations..."):
                     pred=predict_from_dataframes(Config(tournament=tournament_name,sims=int(sims),seed=int(sim_seed)),players,player_stats,results,history,holes,weather)
                     pred=apply_reliability_research(pred,reliability_evidence,
@@ -542,20 +552,25 @@ if page == "🏆 Tournament DFS":
         if not e.empty:
             available=int(pd.to_numeric(e["season_starts"],errors="coerce").ge(8).sum())
             complete=int(e["last_event_sg_complete"].fillna(False).sum())
+            consistent=int(pd.to_numeric(e["recent_complete_sg_events"],errors="coerce").ge(2).sum())
             st.write(f"Pre-event cut records (8+ events): {available}/{len(e)} golfers • "
-                     f"Complete previous-event four-category SG: {complete}/{len(e)}.")
+                     f"Complete previous-event four-category SG: {complete}/{len(e)} • "
+                     f"2+ verified prior-event SG profiles: {consistent}/{len(e)}.")
             if available < 10:
                 st.warning("Fewer than ten golfers have usable pre-event cuts data. "
                            "The cut consistency adjustment is DISABLED (not imputed).")
-            if complete==0:
-                st.warning("No complete latest-event OTT/APP/ARG/PUTT data. "
-                           "No previous-event SG adjustments have been made.")
+            if consistent==0:
+                st.warning("No golfer has 2+ complete previous-event OTT/APP/ARG/PUTT profiles. "
+                           "The short-term SG momentum adjustment is DISABLED, even if a single prior event looks promising.")
             st.download_button("Download dated golfer reliability audit",mc[[c for c in [
                 "player","salary","season_cuts_made","season_starts","historical_cut_pct",
                 "shrunk_cut_pct","cut_record_as_of","cut_evidence_source","last_event_name",
                 "last_event_date","last_event_sg_ott","last_event_sg_approach",
                 "last_event_sg_arg","last_event_sg_putting","last_event_positive_categories",
-                "last_event_all_four_positive","cut_history_strokes_adjustment",
+                "last_event_all_four_positive","recent_complete_sg_events","recent_disrupted_events",
+                "recent_rolling_positive_categories","recent_all_four_positive","recent_min_component_sg",
+                "recent_weighted_sg_ott","recent_weighted_sg_approach","recent_weighted_sg_arg",
+                "recent_weighted_sg_putting","cut_history_strokes_adjustment",
                 "four_category_strokes_adjustment","reliability_strokes_adjustment",
                 "make_cut_pct","v11_mean_dk"] if c in mc.columns]].to_csv(index=False),
                 "pga_pre_event_reliability_audit.csv","text/csv")
@@ -566,8 +581,10 @@ if page == "🏆 Tournament DFS":
                    "Treat DFS projections as experimental until course setup is verified.")
     tab1,tab2=st.tabs(["Model Rankings","Build Lineups"])
     with tab1:
-        display_cols=[c for c in ["player","salary","season_starts","historical_cut_pct","shrunk_cut_pct","last_event_positive_categories","last_event_all_four_positive","reliability_strokes_adjustment","win_pct","top5_pct","top10_pct","top20_pct","make_cut_pct","expected_finish","v11_mean_dk","v11_median_dk","v11_p75_dk","v11_p90_dk","v11_p95_dk","v11_avg_birdies","v11_avg_bogeys","dk_points_proxy","course_fit_ceiling"] if c in mc.columns]
-        sort_options=[c for c in ["v11_mean_dk","v11_p90_dk","win_pct","top10_pct","make_cut_pct","shrunk_cut_pct","last_event_positive_categories","course_fit_ceiling","salary"] if c in mc.columns]
+        display_cols=[c for c in ["player","salary","season_starts","historical_cut_pct","shrunk_cut_pct","last_event_positive_categories","last_event_all_four_positive","recent_complete_sg_events",
+            "recent_disrupted_events","recent_rolling_positive_categories","recent_all_four_positive",
+            "reliability_strokes_adjustment","win_pct","top5_pct","top10_pct","top20_pct","make_cut_pct","expected_finish","v11_mean_dk","v11_median_dk","v11_p75_dk","v11_p90_dk","v11_p95_dk","v11_avg_birdies","v11_avg_bogeys","dk_points_proxy","course_fit_ceiling"] if c in mc.columns]
+        sort_options=[c for c in ["v11_mean_dk","v11_p90_dk","win_pct","top10_pct","make_cut_pct","shrunk_cut_pct","last_event_positive_categories","recent_rolling_positive_categories","course_fit_ceiling","salary"] if c in mc.columns]
         sort_col=st.selectbox("Sort by",sort_options)
         st.dataframe(mc.sort_values(sort_col,ascending=(sort_col=="salary"))[display_cols],width="stretch",hide_index=True)
         st.download_button("Download projections",mc.to_csv(index=False),f"{tournament_name.replace(' ','_')}_projections.csv","text/csv")
@@ -582,6 +599,22 @@ if page == "🏆 Tournament DFS":
                            if c in four.columns]].sort_values("v11_mean_dk",ascending=False),
                            width="stretch",hide_index=True)
 
+        with st.expander("Multi-tournament form: last 2–3 completed events",expanded=False):
+            form_cols=[c for c in ["player","salary","recent_complete_sg_events","recent_disrupted_events",
+                                   "recent_all_four_events","recent_rolling_positive_categories",
+                                   "recent_all_four_positive","recent_min_component_sg",
+                                   "recent_weighted_sg_ott","recent_weighted_sg_approach",
+                                   "recent_weighted_sg_arg","recent_weighted_sg_putting",
+                                   "four_category_strokes_adjustment","make_cut_pct"]
+                                   if c in mc.columns]
+            research=mc[form_cols].copy()
+            st.caption("Requires full EVENT-level statistics from at least two prior tournaments. "
+                       "Shortened or flagged extreme-condition events are visible but excluded from the stability estimate. "
+                       "Missing data is never scored as negative or positive.")
+            st.dataframe(research.sort_values("recent_rolling_positive_categories",ascending=False,
+                        na_position="last"),width="stretch",hide_index=True)
+            st.download_button("Download multi-event form audit",research.to_csv(index=False),
+                               "pga_last_three_event_form_audit.csv","text/csv")
     with tab2:
         a,b,c,d=st.columns(4); lineup_count=a.number_input("Lineups",1,20,10); max_exposure=b.slider("Max exposure",.10,1.0,.50,.05); min_unique=c.number_input("Minimum unique golfers",1,5,3); salary_floor=d.number_input("Minimum lineup salary",40000,50000,46500,100)
         min_player_salary=st.number_input("Minimum golfer salary",6000,10000,6500,100); strategy=st.selectbox("Strategy",["GPP Ceiling","Balanced / Single Entry","Cut Equity"])
