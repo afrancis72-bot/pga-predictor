@@ -396,6 +396,7 @@ if page == "🏠 Setup / Inputs":
     st.subheader("V11 • Golf-first fantasy engine")
     st.caption("V11 simulates holes, applies DK Classic scoring, and optimizes fantasy distributions. Provisional scoring probabilities require calibration; no actual tournament results are used.")
     sims=st.selectbox("Tournament simulations",[1000,3000,5000],index=1)
+    sim_seed=st.number_input("Simulation seed (reproducible)",min_value=0,max_value=2147483647,value=42,step=1,key="pga_tournament_seed")
     tournament_format=st.radio("Tournament format",["No cut — all four rounds","Standard cut — after Round 2"],horizontal=True,index=1)
     cut_size=st.number_input("Approximate cut position (ties included)",min_value=1,max_value=100,value=65,disabled=tournament_format.startswith("No cut"))
     course_par=st.selectbox("Course par",[70,71,72,73],index=2)
@@ -436,7 +437,7 @@ if page == "🏠 Setup / Inputs":
                 else:
                     weather=pd.DataFrame(); weather_source="not supplied"
                 with st.spinner(f"Running {int(sims):,} tournament simulations..."):
-                    pred=predict_from_dataframes(Config(tournament=tournament_name,sims=int(sims),seed=42),players,player_stats,results,history,holes,weather)
+                    pred=predict_from_dataframes(Config(tournament=tournament_name,sims=int(sims),seed=int(sim_seed)),players,player_stats,results,history,holes,weather)
                     hole_pars=None
                     if isinstance(holes,pd.DataFrame) and not holes.empty:
                         for par_col in ("par","Par","hole_par"):
@@ -444,20 +445,29 @@ if page == "🏠 Setup / Inputs":
                                 vals=pd.to_numeric(holes[par_col],errors="coerce").dropna().astype(int).tolist()
                                 if len(vals)==18 and sum(vals)==int(course_par): hole_pars=vals
                                 break
-                    pred,dk_samples,v11_diag=simulate_golf_first(pred,sims=int(sims),seed=42,course_par=int(course_par),
-                        no_cut=tournament_format.startswith("No cut"),cut_size=int(cut_size),hole_pars=hole_pars)
+                    pred,dk_samples,v11_diag,cut_samples=simulate_golf_first(pred,sims=int(sims),seed=int(sim_seed),course_par=int(course_par),
+                        no_cut=tournament_format.startswith("No cut"),cut_size=int(cut_size),hole_pars=hole_pars,return_cut_draws=True)
                     pred["dk_points_proxy"]=pred["v11_mean_dk"]
                     pred["dk_value_per_1000"]=pred["v11_salary_value"]
                     pred["make_cut_pct"]=pred["v11_make_cut_pct"]/100.0
+                    pred["top5_pct"]=pred["v11_top5_pct"]/100.0
                     pred["top10_pct"]=pred["v11_top10_pct"]/100.0
+                    pred["top20_pct"]=pred["v11_top20_pct"]/100.0
+                    pred["expected_finish"]=pred["v11_expected_finish"]
                     pred["win_pct"]=pred["v11_win_pct"]/100.0
+                    pred["model_rank"]=pred["expected_finish"].rank(method="min")
                     pred["v11_gpp_objective"]=0.45*pred["v11_mean_dk"]+0.55*pred["v11_p90_dk"]
                     pred["v11_balanced_objective"]=0.80*pred["v11_mean_dk"]+0.20*pred["v11_p75_dk"]
                     pred["v11_cut_objective"]=0.85*pred["v11_mean_dk"]+0.15*pred["v11_p75_dk"]
                 bundle={"tournament_name":tournament_name,"course_query":course_query,"tournament_start":tournament_start,"country_hint":country_hint,
                         "players":players,"otis_fit":otis_fit,"player_stats":player_stats,"results":results,"history":history,"holes":holes,"weather":weather,
                         "holes_source":holes_source,"weather_source":weather_source,"dk_format":dk_format,"otis_status":otis_status,"otis_match_count":match_count,
-                        "sims":int(sims),"prediction":pred,"selected_course":selected_course,"v11_diagnostics":v11_diag,"tournament_format":tournament_format}
+                        "sims":int(sims),"seed":int(sim_seed),"prediction":pred,"selected_course":selected_course,
+                        "v11_score_samples":dk_samples,"v11_made_cut_samples":cut_samples,
+                        "v11_scenario_players":pred["player"].astype(str).tolist(),
+                        "v11_diagnostics":v11_diag,"tournament_format":tournament_format}
+                # A new tournament model invalidates any previously approved/generated portfolio.
+                st.session_state.dfs_portfolio=None
                 st.session_state.pga_bundle=bundle; st.session_state.prediction=pred
                 st.success(f"Setup ready — {len(players)} golfers, DK ↔ OTIS {match_count}/{len(players)}, {int(sims):,} simulations complete.")
             except Exception as exc:
@@ -492,6 +502,11 @@ if page == "🏆 Tournament DFS":
     st.info(f"V11 golf-first active • {bundle.get('tournament_format','format not specified')} • "
             f"{bundle.get('v11_diagnostics',{}).get('hole_pars_source','unknown hole pars')}. "
             "DK scoring from simulated golf; probabilities remain provisional until calibrated.")
+    st.caption("V11 rankings (win/top-5/top-10/top-20, cut and expected finish) are reconciled from the same hole simulation.")
+    if bundle.get("v11_diagnostics", {}).get("hole_pars_source") == "generic provisional template":
+        st.warning("PROVISIONAL COURSE: verified 18-hole par composition was unavailable. "
+                   "The golf simulator used a generic course layout, NOT confirmed venue hole pars. "
+                   "Treat DFS projections as experimental until course setup is verified.")
     tab1,tab2=st.tabs(["Model Rankings","Build Lineups"])
     with tab1:
         display_cols=[c for c in ["player","salary","win_pct","top5_pct","top10_pct","top20_pct","make_cut_pct","expected_finish","v11_mean_dk","v11_median_dk","v11_p75_dk","v11_p90_dk","v11_p95_dk","v11_avg_birdies","v11_avg_bogeys","dk_points_proxy","course_fit_ceiling"] if c in mc.columns]
@@ -504,12 +519,16 @@ if page == "🏆 Tournament DFS":
         min_player_salary=st.number_input("Minimum golfer salary",6000,10000,6500,100); strategy=st.selectbox("Strategy",["GPP Ceiling","Balanced / Single Entry","Cut Equity"])
         names=sorted(mc.player.dropna().astype(str).unique()); locks=st.multiselect("Lock golfers",names); excludes=st.multiselect("Exclude golfers",[n for n in names if n not in locks])
         if st.button("Generate portfolio",type="primary"):
-            settings=PortfolioSettings(lineup_count=int(lineup_count),salary_cap=50000,salary_floor=int(salary_floor),min_player_salary=int(min_player_salary),roster_size=6,max_exposure=float(max_exposure),min_unique=int(min_unique),strategy=strategy,seed=42)
+            settings=PortfolioSettings(lineup_count=int(lineup_count),salary_cap=50000,salary_floor=int(salary_floor),min_player_salary=int(min_player_salary),roster_size=6,max_exposure=float(max_exposure),min_unique=int(min_unique),strategy=strategy,seed=int(bundle.get("seed",42)))
             try:
                 progress=st.progress(0,text="Preparing DFS optimizer…")
                 def _dfs_progress(frac,msg):
                     progress.progress(min(1.0,max(0.0,float(frac))),text=msg)
-                portfolio,summary,exposure=optimize_portfolio(mc,settings,locks,excludes,progress_callback=_dfs_progress)
+                portfolio,summary,exposure=optimize_portfolio(
+                    mc,settings,locks,excludes,progress_callback=_dfs_progress,
+                    scenario_scores=bundle.get("v11_score_samples"),
+                    scenario_cuts=bundle.get("v11_made_cut_samples"),
+                    scenario_players=bundle.get("v11_scenario_players"))
                 st.session_state.dfs_portfolio={"portfolio":portfolio,"summary":summary,"exposure":exposure}
                 progress.empty()
                 st.success(f"Generated {len(summary)} lineups.")
