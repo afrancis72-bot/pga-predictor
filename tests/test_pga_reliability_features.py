@@ -46,6 +46,18 @@ class ReliabilityResearchTests(unittest.TestCase):
         self.assertEqual(e.loc["B","last_event_positive_categories"],3)
         self.assertTrue(pd.isna(e.loc["C","last_event_all_four_positive"]))
 
+    def test_round_specific_sg_does_not_masquerade_as_whole_event(self):
+        logs=pd.DataFrame([
+            {"player":"A","date":"2026-10-20","event_id":"most recent",
+             "round":1,"sg_ott":.5,"sg_approach":.5,"sg_arg":.5,"sg_putting":.5},
+            {"player":"A","date":"2026-10-20","event_id":"most recent",
+             "round":2,"sg_ott":.5,"sg_approach":.5,"sg_arg":.5,"sg_putting":.5}
+        ])
+        e=build_pre_event_evidence(["A"],event_results=logs,tournament_start="2026-10-29")
+        self.assertEqual(e.loc[0,"last_event_date"],"2026-10-20")
+        self.assertFalse(e.loc[0,"last_event_sg_complete"])
+        self.assertTrue(pd.isna(e.loc[0,"last_event_all_four_positive"]))
+
     def test_single_snapshot_splits_into_previous_event_records(self):
         s=pd.DataFrame([{"player":"A","as_of":"2026-10-22","events_played":21,
                          "cuts_made":13,"last_event_name":"First Event",
