@@ -528,6 +528,14 @@ if page == "🏠 Setup / Inputs":
                     pred["top20_pct"]=pred["v11_top20_pct"]/100.0
                     pred["expected_finish"]=pred["v11_expected_finish"]
                     pred["win_pct"]=pred["v11_win_pct"]/100.0
+                    # A strong Korn Ferry finish streak paired with a low PGA
+                    # forecast is a model-diagnostic disagreement, NOT an
+                    # automatic reason to raise the PGA probability.
+                    if "kft_review_candidate" in pred:
+                        high_kft=pred["kft_review_candidate"].fillna(False).astype(bool)
+                        pred["cross_tour_disagreement"]=high_kft & pred["make_cut_pct"].lt(.55)
+                    else:
+                        pred["cross_tour_disagreement"]=False
                     pred["model_rank"]=pred["expected_finish"].rank(method="min")
                     # Include unmatched entrants when simulating cut lines, but do
                     # NOT recommend them for real-money lineups without weekly skill data.
@@ -690,6 +698,15 @@ if page == "🏆 Tournament DFS":
             st.download_button("Download multi-event form audit",research.to_csv(index=False),
                                "pga_last_three_event_form_audit.csv","text/csv")
     with tab2:
+        disagreements=mc.loc[mc.get("cross_tour_disagreement",pd.Series(False,index=mc.index)).fillna(False)].copy()
+        if not disagreements.empty:
+            st.warning(f"{len(disagreements)} golfers have strong verified Korn Ferry results "
+                       "but lower than 55% PGA cut projections. Investigate this model disagreement "
+                       "before approving or excluding them; no outcome is guaranteed.")
+            show=[c for c in ["player","salary","kft_last5_events","kft_last5_top25",
+                                "kft_last5_wins","make_cut_pct","v11_mean_dk"]
+                                if c in disagreements]
+            st.dataframe(disagreements[show],width="stretch",hide_index=True)
         a,b,c,d=st.columns(4); lineup_count=a.number_input("Lineups",1,20,10); max_exposure=b.slider("Max exposure",.10,1.0,.20,.05); min_unique=c.number_input("Minimum unique golfers",1,5,3); salary_floor=d.number_input("Minimum lineup salary",40000,50000,46500,100)
         min_distinct=int(np.ceil(int(lineup_count)*6/max(1,int(np.floor(float(max_exposure)*int(lineup_count)+1e-9)))))
         st.caption(f"Portfolio risk: {int(lineup_count)*6} total roster spots, maximum "
