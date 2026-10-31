@@ -15,7 +15,25 @@ import re
 import pandas as pd
 import numpy as np
 
-from dated_event_discovery import _display_end
+
+def _display_end(value, season_year):
+    """Parse explicit or display-range end; a candidate date, never certification."""
+    text=str(value).strip()
+    months=r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*"
+    pattern=rf"^({months})\s+(\d{{1,2}})\s*[-–]\s*(?:({months})\s+)?(\d{{1,2}})$"
+    match=re.fullmatch(pattern,text,flags=re.I)
+    if match:
+        start_month,start_day,end_month,end_day=match.groups()
+        end_month=end_month or start_month
+        start=pd.to_datetime(f"{start_month} {start_day} {season_year}",errors="coerce",utc=True)
+        end=pd.to_datetime(f"{end_month} {end_day} {season_year}",errors="coerce",utc=True)
+        if pd.isna(start) or pd.isna(end):return pd.NaT
+        if end<start:
+            end=pd.to_datetime(f"{end_month} {end_day} {season_year+1}",errors="coerce",utc=True)
+        return end
+    explicit=re.findall(r"[A-Za-z]{3,9} +[0-9]{1,2},? +[0-9]{4}|[0-9]{4}-[0-9]{2}-[0-9]{2}",text)
+    return pd.to_datetime(explicit[-1],errors="coerce",utc=True) if explicit else pd.NaT
+
 
 SG_IDS = {2567: "sg_ott", 2568: "sg_approach",
           2569: "sg_arg", 2564: "sg_putting"}
