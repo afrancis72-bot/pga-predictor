@@ -79,5 +79,53 @@ class AutoPGA(unittest.TestCase):
         e,ignored=validate_completed_events(d,"2026-10-29")
         self.assertEqual(len(e),2)
 
+class TwoTourCase(unittest.TestCase):
+    def test_korn_ferry_form_is_visible_but_not_pga_cut_record(self):
+        class DualProvider:
+            @staticmethod
+            def pga_schedule(year,tour):
+                if year!=2026:return pd.DataFrame()
+                schedules={"R":[("R2026031","Oct 15 - 18")],
+                           "H":[("H2026094","Oct 8 - 11"),
+                                ("H2026093","Oct 1 - 4"),
+                                ("H2026092","Sep 17 - 20")]}
+                return pd.DataFrame([
+                    {"tournament_id":tid,"tournament_name":tid,
+                     "display_date":dt,"status":"COMPLETED"}
+                    for tid,dt in schedules[tour]])
+            @staticmethod
+            def pga_leaderboard(event_id):
+                rows=[{"player_id":str(i+10000),"display_name":f"Other {i}",
+                       "position":str(i+1) if i<70 else "CUT",
+                       "round_1":70,"round_2":70,"round_3":70,"round_4":70}
+                      for i in range(80)]
+                if event_id.startswith("H"):
+                    rows[0].update({"player_id":"65001","display_name":"Alvaro Ortiz",
+                                    "position":("T9" if event_id.endswith("94") else
+                                                "T24" if event_id.endswith("93") else "1")})
+                else:
+                    rows[0].update({"player_id":"65002","display_name":"William Mouw",
+                                    "position":"T32"})
+                lb=pd.DataFrame(rows)
+                lb.attrs["tournament_status"]="COMPLETED"
+                return lb
+            @staticmethod
+            def pga_scorecard_stats(event_id,pid,round="-1"):
+                return pd.DataFrame([{"round":"-1","section":"strokesGained",
+                                     "stat_id":sid,"total":4}
+                                     for sid in ("02567","02568","02569","02564")])
+        cut,sg,logs=collect_pre_event_history(
+            ["Alvaro Ortiz","William Mouw"],"2026-10-29",
+            provider=DualProvider,max_workers=1,lookback=25)
+        row=cut.set_index("player").loc["Alvaro Ortiz"]
+        self.assertTrue(pd.isna(row["events_played"]))
+        self.assertEqual(int(row["kft_starts"]),3)
+        self.assertEqual(int(row["kft_last5_top25"]),3)
+        self.assertTrue(bool(row["kft_review_candidate"]))
+        self.assertEqual(int(cut.set_index("player").loc["William Mouw","events_played"]),1)
+        self.assertTrue(sg.loc[sg.player.eq("Alvaro Ortiz"),"source_tour"].eq("H").all())
+        self.assertTrue(logs.stage.eq("summary").any())
+
+
 if __name__=="__main__":
     unittest.main()
