@@ -189,18 +189,24 @@ def apply_reliability_research(projections, evidence, *, no_cut=False):
         reference=float(qualified.median())
         trust=(starts/24.).clip(0.,1.).fillna(0.)
         cut_strokes=(-(rate-reference)*0.008*trust).clip(-.18,.18).fillna(0.)
-    # Positive SG breadth is descriptive; one tournament is noisy. Only a
-    # COMPLETELY OBSERVED event contributes a bounded exploratory effect.
-    count=pd.to_numeric(d.get("last_event_positive_categories"),errors="coerce")
-    breadth_strokes=count.map({0:.06,1:.03,2:0.,3:-.02,4:-.06}).fillna(0.)
+    # A strong single week is NOT enough to change a forecast. Two completed,
+    # comparable events with verified OTT/APP/ARG/PUTT observations are required
+    # before the 2–3 event stability feature affects expected strokes.
+    count=pd.to_numeric(d.get("recent_rolling_positive_categories"),errors="coerce")
+    n_events=pd.to_numeric(d.get("recent_complete_sg_events"),errors="coerce")
+    confirmed=n_events.ge(2) & count.notna()
+    # Conservative bounded correction (less than 0.10 strokes / round).
+    # Heuristic coefficients MUST be replaced by walk-forward fitted evidence.
+    breadth_strokes=count.map({0:.06,1:.03,2:0.,3:-.025,4:-.075}).where(confirmed,0.).fillna(0.)
     d["expected_round_pre_reliability"]=before
     d["cut_history_strokes_adjustment"]=cut_strokes
     d["four_category_strokes_adjustment"]=breadth_strokes
+    d["multi_event_form_source"]="two-plus complete prior events"
     d["expected_round"]=(before+cut_strokes+breadth_strokes).clip(-6.,6.)
     d["reliability_strokes_adjustment"]=d["expected_round"]-before
     d["cut_reference_covered_field_pct"]=float(qualified.median()) if len(qualified)>=10 else np.nan
     d["reliability_input_coverage"]=(
         (starts.ge(8) & rate.notna()).astype(int) +
-        count.notna().astype(int)
+        confirmed.astype(int)
     )
     return d
