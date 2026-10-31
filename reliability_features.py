@@ -192,8 +192,8 @@ def apply_reliability_research(projections, evidence, *, no_cut=False):
     # A strong single week is NOT enough to change a forecast. Two completed,
     # comparable events with verified OTT/APP/ARG/PUTT observations are required
     # before the 2–3 event stability feature affects expected strokes.
-    count=pd.to_numeric(d.get("recent_rolling_positive_categories"),errors="coerce")
-    n_events=pd.to_numeric(d.get("recent_complete_sg_events"),errors="coerce")
+    count=pd.to_numeric(d.get("recent_rolling_positive_categories",pd.Series(np.nan,index=d.index)),errors="coerce")
+    n_events=pd.to_numeric(d.get("recent_complete_sg_events",pd.Series(np.nan,index=d.index)),errors="coerce")
     confirmed=n_events.ge(2) & count.notna()
     # Conservative bounded correction (less than 0.10 strokes / round).
     # Heuristic coefficients MUST be replaced by walk-forward fitted evidence.
