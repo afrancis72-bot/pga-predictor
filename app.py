@@ -554,6 +554,9 @@ if page == "🏆 Tournament DFS":
             st.dataframe(po["summary"],width="stretch",hide_index=True); st.dataframe(po["portfolio"],width="stretch",hide_index=True)
             st.subheader("Exposure"); st.dataframe(po["exposure"],width="stretch",hide_index=True)
             st.download_button("Download lineups CSV",po["portfolio"].to_csv(index=False),"pga_lineups.csv","text/csv")
+            st.download_button("Download six-of-six and lineup simulation audit",
+                               po["summary"].to_csv(index=False),
+                               "pga_lineup_simulation_audit.csv","text/csv")
 
 elif page == "🏌️ Round Showdown":
     from round_showdown import build_showdown_pool, optimize_showdown
